@@ -14,7 +14,7 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The keychain service name every secret is stored under.
@@ -585,229 +585,17 @@ impl SecretStore for MemoryStore {
     }
 }
 
-/// The Secret Service (GNOME Keyring, KWallet) through oo7, as gpui itself uses it.
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-pub struct SystemStore;
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-impl SystemStore {
-    fn keyring() -> Result<oo7::Keyring, String> {
-        futures_lite::future::block_on(async {
-            // `oo7::Keyring::new` takes `GTK_USE_PORTAL=1` (set by many KDE desktops) for a
-            // sandbox, and then keeps the secrets in a file under a key the Secret portal gives
-            // per app id. Outside a sandbox that id comes from how the launcher was started (the
-            // menu or a terminal), so the file opened in one start and not the next (#3249).
-            // Flatpak (`/.flatpak-info`) and Snap (`$SNAP`) keep the portal's file.
-            let sandboxed =
-                Path::new("/.flatpak-info").exists() || std::env::var_os("SNAP").is_some();
-            let keyring = if sandboxed {
-                oo7::Keyring::new().await.map_err(|e| e.to_string())?
-            } else {
-                let service = oo7::dbus::Service::new().await.map_err(|e| e.to_string())?;
-                oo7::Keyring::DBus(
-                    service
-                        .default_collection()
-                        .await
-                        .map_err(|e| e.to_string())?,
-                )
-            };
-            keyring.unlock().await.map_err(|e| e.to_string())?;
-            Ok(keyring)
-        })
-    }
-}
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-impl SecretStore for SystemStore {
-    fn get(&self, key: &str) -> Result<Option<String>, String> {
-        let keyring = Self::keyring()?;
-        futures_lite::future::block_on(async {
-            let attributes = vec![("service", SERVICE), ("account", key)];
-            let items = keyring
-                .search_items(&attributes)
-                .await
-                .map_err(|e| e.to_string())?;
-            let Some(item) = items.into_iter().next() else {
-                return Ok(None);
-            };
-            item.unlock().await.map_err(|e| e.to_string())?;
-            let secret = item.secret().await.map_err(|e| e.to_string())?;
-            Ok(String::from_utf8(secret.to_vec()).ok())
-        })
-    }
-    fn set(&self, key: &str, secret: &str) -> Result<(), String> {
-        let keyring = Self::keyring()?;
-        futures_lite::future::block_on(async {
-            let attributes = vec![("service", SERVICE), ("account", key)];
-            keyring
-                .create_item(
-                    "Horizon launcher: Minecraft account",
-                    &attributes,
-                    secret.as_bytes(),
-                    true,
-                )
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-    fn delete(&self, key: &str) -> Result<(), String> {
-        let keyring = Self::keyring()?;
-        futures_lite::future::block_on(async {
-            let attributes = vec![("service", SERVICE), ("account", key)];
-            keyring.delete(&attributes).await.map_err(|e| e.to_string())
-        })
-    }
-    fn persistent(&self) -> bool {
-        true
-    }
-}
+// Horizon Offline Fork: Keyring and OS keychain dependencies stripped.
+// Secrets and sessions are maintained in an ephemeral in-memory store.
+pub const NO_KEYCHAIN: &str = "";
 
-/// Keychain on macOS, Credential Manager on Windows (the keyring crate). Credential Manager takes at
-/// most 2560 bytes of UTF-16 per item and a sign-in's secrets are longer, so a secret is kept in
-/// pieces: the first under the account's key, the rest under `key.1`, `key.2`...
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-pub struct SystemStore;
-
-/// Bytes of UTF-8 per keychain item: at most twice as many in UTF-16, well under 2560.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-const PIECE: usize = 1000;
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn piece_key(key: &str, n: usize) -> String {
-    if n == 0 {
-        key.to_string()
-    } else {
-        format!("{key}.{n}")
-    }
-}
-
-/// `secret` cut into pieces of at most `PIECE` bytes, on character boundaries.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn split_secret(mut secret: &str) -> Vec<&str> {
-    let mut pieces = Vec::new();
-    while secret.len() > PIECE {
-        let mut cut = PIECE;
-        while !secret.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        let (head, tail) = secret.split_at(cut);
-        pieces.push(head);
-        secret = tail;
-    }
-    pieces.push(secret);
-    pieces
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn read_item(key: &str) -> Result<Option<String>, String> {
-    match keyring::Entry::new(SERVICE, key).and_then(|e| e.get_password()) {
-        Ok(secret) => Ok(Some(secret)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(e.to_string()),
-    }
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn write_item(key: &str, secret: &str) -> Result<(), String> {
-    keyring::Entry::new(SERVICE, key)
-        .and_then(|e| e.set_password(secret))
-        .map_err(|e| e.to_string())
-}
-
-/// Removes one item; false when there was none.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn remove_item(key: &str) -> Result<bool, String> {
-    match keyring::Entry::new(SERVICE, key).and_then(|e| e.delete_credential()) {
-        Ok(()) => Ok(true),
-        Err(keyring::Error::NoEntry) => Ok(false),
-        Err(e) => Err(e.to_string()),
-    }
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-impl SecretStore for SystemStore {
-    fn get(&self, key: &str) -> Result<Option<String>, String> {
-        let Some(mut secret) = read_item(key)? else {
-            return Ok(None);
-        };
-        for n in 1.. {
-            match read_item(&piece_key(key, n))? {
-                Some(piece) => secret.push_str(&piece),
-                None => break,
-            }
-        }
-        Ok(Some(secret))
-    }
-    fn set(&self, key: &str, secret: &str) -> Result<(), String> {
-        let pieces = split_secret(secret);
-        for (n, piece) in pieces.iter().enumerate() {
-            write_item(&piece_key(key, n), piece)?;
-        }
-        // Pieces left over from a longer secret would be read back as part of this one.
-        for n in pieces.len().. {
-            if !remove_item(&piece_key(key, n))? {
-                break;
-            }
-        }
-        Ok(())
-    }
-    fn delete(&self, key: &str) -> Result<(), String> {
-        for n in 0.. {
-            if !remove_item(&piece_key(key, n))? {
-                break;
-            }
-        }
-        Ok(())
-    }
-    fn persistent(&self) -> bool {
-        true
-    }
-}
-
-pub const NO_KEYCHAIN: &str = "No keychain available: you are signed in until the launcher closes, then you will have to sign in again.";
-
-/// What the keychain answered when [`store`] fell back to memory.
-static NO_KEYCHAIN_WHY: OnceLock<String> = OnceLock::new();
-
-/// What the window and the CLI say when sign-ins last only this run: [`NO_KEYCHAIN`] and why.
-/// None while the keychain keeps them.
 pub fn no_keychain() -> Option<String> {
-    if store().persistent() {
-        return None;
-    }
-    Some(match NO_KEYCHAIN_WHY.get() {
-        Some(why) => format!("{NO_KEYCHAIN} The keychain said: {why}"),
-        None => NO_KEYCHAIN.into(),
-    })
+    None
 }
 
-/// The keychain if it answers, else memory for this run (said in the UI with [`no_keychain`]).
-/// Never a file of its own: secrets are kept by the system or not at all.
 pub fn store() -> &'static dyn SecretStore {
-    static STORE: OnceLock<Box<dyn SecretStore>> = OnceLock::new();
-    STORE
-        .get_or_init(|| {
-            // Unit tests never reach the player's keychain.
-            #[cfg(all(
-                not(test),
-                any(
-                    target_os = "linux",
-                    target_os = "freebsd",
-                    target_os = "macos",
-                    target_os = "windows"
-                )
-            ))]
-            {
-                let why = match std::env::var_os("HORIZON_NO_KEYCHAIN") {
-                    Some(_) => "HORIZON_NO_KEYCHAIN is set.".to_string(),
-                    None => match SystemStore.get("probe") {
-                        Ok(_) => return Box::new(SystemStore),
-                        Err(e) => e,
-                    },
-                };
-                let _ = NO_KEYCHAIN_WHY.set(why);
-            }
-            Box::<MemoryStore>::default()
-        })
-        .as_ref()
+    static STORE: std::sync::OnceLock<Box<dyn SecretStore>> = std::sync::OnceLock::new();
+    STORE.get_or_init(|| Box::<MemoryStore>::default()).as_ref()
 }
 
 // ----- Accounts ------------------------------------------------------------------------------------
@@ -841,6 +629,7 @@ pub enum Player {
     GameName,
 }
 
+#[allow(dead_code)]
 const OFFLINE_NEEDS_OWNER: &str =
     "Offline names need a Microsoft account that owns Minecraft: Java Edition in the launcher.";
 
@@ -934,9 +723,9 @@ impl Accounts {
     /// the game.
     pub fn play_as_with(
         &mut self,
-        store: &dyn SecretStore,
+        _store: &dyn SecretStore,
         who: Player,
-        offline_without_owner: bool,
+        _offline_without_owner: bool,
     ) -> Result<(), String> {
         match who {
             Player::Microsoft(uuid) => {
@@ -946,9 +735,7 @@ impl Accounts {
                 self.selected = Some(uuid);
             }
             Player::Offline(name) => {
-                if !offline_without_owner && !self.has_owner(store) {
-                    return Err(OFFLINE_NEEDS_OWNER.into());
-                }
+                // Horizon Offline Fork: Always allow offline names without owner check
                 let name = self.add_offline(&name)?;
                 self.selected = None;
                 self.offline_selected = Some(name);
@@ -1140,7 +927,10 @@ pub fn launch(
     if owned {
         Ok(pass)
     } else {
-        Err(NoOwner)
+        // Horizon Offline Fork: Always permit offline play without Microsoft account
+        let name = accounts.name_arg().unwrap_or("HorizonPlayer");
+        pass.offline = Some(format!("Playing offline as {name}"));
+        Ok(pass)
     }
 }
 
@@ -1258,7 +1048,7 @@ impl SignIn {
 /// `offline_without_owner`: see [`launch_for_game`].
 pub fn session_for_game(
     game_home: &Path,
-    offline_without_owner: bool,
+    _offline_without_owner: bool,
 ) -> Result<(Option<PathBuf>, Option<String>), NoOwner> {
     let mut accounts = Accounts::load();
     let pass = launch_for_game(
@@ -1266,7 +1056,7 @@ pub fn session_for_game(
         client_id().as_deref(),
         store(),
         &mut accounts,
-        offline_without_owner,
+        true, // Horizon Offline Fork: Always allow offline launch
     )?;
     let _ = accounts.save();
     let Some((account, secrets)) = pass.session else {

@@ -53,19 +53,12 @@ getrandom = "0.3"
 # in the lockfile through gpui).
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 
-# Microsoft account secrets in the OS keychain: the Secret Service on Linux through oo7 (the same
-# build gpui uses), Keychain and Credential Manager through keyring.
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
-oo7 = { version = "0.5", default-features = false, features = ["async-std", "native_crypto"] }
-futures-lite = "2"
+# Horizon Offline Fork: Keyring and MSA persistence dependencies (oo7, futures-lite, keyring) removed.
 [target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "3", features = ["apple-native"] }
 # Painting the window's title bar dark or light (titlebar::apply_appearance): crates already in
 # the lockfile through gpui and wgpu.
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSAppearance", "NSView", "NSWindow"] }
 raw-window-handle = "0.6"
-[target.'cfg(target_os = "windows")'.dependencies]
-keyring = { version = "3", features = ["windows-native"] }
 
 [target.'cfg(windows)'.build-dependencies]
 # The icon resource in the .exe (build.rs).

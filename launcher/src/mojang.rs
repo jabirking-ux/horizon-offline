@@ -72,6 +72,32 @@ pub fn download(
         size: client["size"].as_u64(),
         path: versions.join(format!("{v}.jar")),
     }];
+    if let Some(server) = manifest["downloads"].get("server") {
+        if !server.is_null() {
+            let server_sha1 = text(server, "sha1").unwrap_or_default();
+            if let Ok(server_url) = text(server, "url") {
+                game.push(File {
+                    url: server_url,
+                    sha1: server_sha1,
+                    size: server["size"].as_u64(),
+                    path: dir.join(format!("{v}-server.jar")),
+                });
+            }
+        }
+    }
+    if let Some(server) = manifest["downloads"].get("server") {
+        if !server.is_null() {
+            let server_sha1 = text(server, "sha1").unwrap_or_default();
+            if let Ok(server_url) = text(server, "url") {
+                game.push(File {
+                    url: server_url,
+                    sha1: server_sha1,
+                    size: server["size"].as_u64(),
+                    path: dir.join(format!("{v}-server.jar")),
+                });
+            }
+        }
+    }
     let libraries = manifest["libraries"]
         .as_array()
         .ok_or("The version file has no libraries")?;
