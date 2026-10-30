@@ -51,7 +51,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libvulkan-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libfontconfig1-dev
+          sudo apt-get install -y libasound2-dev libvulkan-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libfontconfig1-dev libudev-dev
 
       - name: Build Launcher
         run: cargo build --profile dist --manifest-path launcher/Cargo.toml --target ${{ matrix.target }}
@@ -69,8 +69,12 @@ jobs:
           Copy-Item target/release/horizon-ctl.exe game-dist/horizon-windows-x64/
           Copy-Item target/release/horizon-prepare.exe game-dist/horizon-windows-x64/
           Copy-Item target/release/horizon-server.exe game-dist/horizon-windows-x64/
-          Copy-Item -Recurse crates, exporters, mods, tools game-dist/horizon-windows-x64/
-          Copy-Item PLAY.txt, research-lock.json, LICENSE game-dist/horizon-windows-x64/
+          if (Test-Path crates) { Copy-Item -Recurse crates game-dist/horizon-windows-x64/ }
+          if (Test-Path mods) { Copy-Item -Recurse mods game-dist/horizon-windows-x64/ }
+          if (Test-Path tools) { Copy-Item -Recurse tools game-dist/horizon-windows-x64/ }
+          if (Test-Path packaging/PLAY.txt) { Copy-Item packaging/PLAY.txt game-dist/horizon-windows-x64/ }
+          if (Test-Path research-lock.json) { Copy-Item research-lock.json game-dist/horizon-windows-x64/ }
+          if (Test-Path LICENSE) { Copy-Item LICENSE game-dist/horizon-windows-x64/ }
           Compress-Archive -Path game-dist/horizon-windows-x64/* -DestinationPath horizon-windows-x64.zip
 
       - name: Build Game (Linux)
@@ -82,7 +86,12 @@ jobs:
         run: |
           mkdir -p game-dist/horizon-linux-x86_64
           cp target/release/horizon-client target/release/horizon-ctl target/release/horizon-prepare target/release/horizon-server game-dist/horizon-linux-x86_64/
-          cp -r crates exporters mods tools PLAY.txt research-lock.json LICENSE game-dist/horizon-linux-x86_64/
+          [ -d crates ] && cp -r crates game-dist/horizon-linux-x86_64/ || true
+          [ -d mods ] && cp -r mods game-dist/horizon-linux-x86_64/ || true
+          [ -d tools ] && cp -r tools game-dist/horizon-linux-x86_64/ || true
+          [ -f packaging/PLAY.txt ] && cp packaging/PLAY.txt game-dist/horizon-linux-x86_64/ || true
+          [ -f research-lock.json ] && cp research-lock.json game-dist/horizon-linux-x86_64/ || true
+          [ -f LICENSE ] && cp LICENSE game-dist/horizon-linux-x86_64/ || true
           tar -czf horizon-linux-x86_64.tar.gz -C game-dist horizon-linux-x86_64
 
       - name: Package Artifact (Linux / macOS)
@@ -97,16 +106,11 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -Path launcher/target/${{ matrix.target }}/dist/${{ matrix.binary }} -DestinationPath ${{ matrix.asset }}
-          choco install nsis -y
-          $ver = "${{ github.event.inputs.tag_name || github.ref_name }}".TrimStart('v').Replace('-offline', '')
-          if (-not $ver) { $ver = "0.2.0" }
-          $srcExe = (Resolve-Path "launcher/target/${{ matrix.target }}/dist/${{ matrix.binary }}").Path
+          $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          $src = (Resolve-Path "packaging/windows/installer.cs").Path
           $icon = (Resolve-Path "packaging/icons/horizon.ico").Path
-          if (Get-Command makensis -ErrorAction SilentlyContinue) {
-            makensis /DVERSION=$ver "/DSOURCE_EXE=$srcExe" "/DICON_FILE=$icon" /DOUT_FILE=Borizon-Setup.exe packaging/windows/installer.nsi
-          } else {
-            & "C:\Program Files (x86)\NSIS\makensis.exe" /DVERSION=$ver "/DSOURCE_EXE=$srcExe" "/DICON_FILE=$icon" /DOUT_FILE=Borizon-Setup.exe packaging/windows/installer.nsi
-          }
+          $res = (Resolve-Path "launcher/target/${{ matrix.target }}/dist/${{ matrix.binary }}").Path
+          & $csc /target:winexe /optimize+ /platform:x64 "/win32icon:$icon" "/resource:$res,HorizonLauncher" /out:Borizon-Setup.exe "$src"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
