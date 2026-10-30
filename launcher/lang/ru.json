@@ -98,7 +98,6 @@
   "Prepare again": "Подготовить заново",
   "None needed: Horizon downloads Minecraft directly from Mojang.": "Папка не нужна: Horizon скачает Minecraft напрямую у Mojang.",
   "Not found. Choose the folder where your launcher keeps Minecraft.": "Не найдено. Выберите папку, где ваш лаунчер хранит Minecraft.",
-  "Ready to play": "Готово к игре",
   "Resources": "Ресурсы",
   "Minecraft folder": "Папка Minecraft",
   "Choose…": "Выбрать…",
@@ -211,5 +210,11 @@
   "about a minute left": "осталось около минуты",
   "about {n} min left": "осталось около {n} мин",
   "Game files": "Файлы игры",
-  "Sounds": "Звуки"
+  "Sounds": "Звуки",
+  "Overview": "Обзор",
+  "Worlds": "Миры",
+  "Multiplayer": "Сетевая игра",
+  "Packs": "Наборы",
+  "Screenshots": "Скриншоты",
+  "Console": "Консоль"
 }

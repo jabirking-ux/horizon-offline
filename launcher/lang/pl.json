@@ -92,7 +92,6 @@
   "Preparing…": "Przygotowywanie…",
   "Prepare": "Przygotuj",
   "Prepare again": "Przygotuj ponownie",
-  "Ready to play": "Gotowe do gry",
   "Resources": "Zasoby",
   "Minecraft folder": "Folder Minecrafta",
   "Choose…": "Wybierz…",
@@ -210,6 +209,12 @@
   "about {n} min left": "zostało około {n} min",
   "Game files": "Pliki gry",
   "Sounds": "Dźwięki",
+  "Overview": "Przegląd",
+  "Worlds": "Światy",
+  "Multiplayer": "Gra wieloosobowa",
+  "Packs": "Paczki",
+  "Screenshots": "Zrzuty ekranu",
+  "Console": "Konsola",
   "Minecraft {version} (Java Edition). Play downloads it directly from Mojang the first time, with the Java it needs.": "Minecraft {version} (Java Edition). Za pierwszym razem opcja Graj pobiera go bezpośrednio od Mojang wraz z wymaganą Javą.",
   "None needed: Horizon downloads Minecraft directly from Mojang.": "Nie jest wymagana: Horizon pobiera grę Minecraft bezpośrednio od firmy Mojang."
 }
