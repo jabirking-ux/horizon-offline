@@ -55,14 +55,19 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 
 # Horizon Offline Fork: Keyring and MSA persistence dependencies (oo7, futures-lite, keyring) removed.
 [target.'cfg(target_os = "macos")'.dependencies]
-# Painting the window's title bar dark or light (titlebar::apply_appearance): crates already in
-# the lockfile through gpui and wgpu.
-objc2-app-kit = { version = "0.3", default-features = false, features = ["NSAppearance", "NSView", "NSWindow"] }
+# Painting the window's title bar dark or light (titlebar::apply_appearance), and the system's
+# reduced motion (sky::moves): crates already in the lockfile through gpui and wgpu.
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSAccessibility", "NSAppearance", "NSView", "NSWindow", "NSWorkspace"] }
 raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.build-dependencies]
 # The icon resource in the .exe (build.rs).
 winresource = "0.1"
+
+[dev-dependencies]
+# Tokenize source strings for the translation completeness test, including multiline calls.
+proc-macro2 = "1"
+syn = "2"
 
 [profile.release]
 strip = true

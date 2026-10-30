@@ -27,6 +27,8 @@ impl Column {
 /// Values of type `T` per section key, in a dense list with stable keys and
 /// slots that move only when a section is removed.
 pub struct Resident<T> {
+    /// The minimum Y of section index 0 (the level's column).
+    min_y: i32,
     items: Vec<(SectionKey, T)>,
     slots: FxHashMap<SectionKey, u32>,
     columns: Vec<Column>,
@@ -36,6 +38,7 @@ pub struct Resident<T> {
 impl<T> Default for Resident<T> {
     fn default() -> Self {
         Self {
+            min_y: crate::chunk::MIN_Y,
             items: Vec::new(),
             slots: FxHashMap::default(),
             columns: Vec::new(),
@@ -60,6 +63,10 @@ impl<T> Resident<T> {
     }
     pub fn get_mut(&mut self, slot: u32) -> &mut T {
         &mut self.items[slot as usize].1
+    }
+    /// Sections from now on count from `min_y` (a level of another column).
+    pub fn set_min_y(&mut self, min_y: i32) {
+        self.min_y = min_y;
     }
     pub fn clear(&mut self) {
         self.items.clear();
@@ -144,11 +151,10 @@ pub struct Visible {
 }
 
 /// The camera-relative origin of the section at `key`.
-#[cfg(test)]
-fn origin(key: SectionKey, camera: DVec3) -> DVec3 {
+fn origin(key: SectionKey, min_y: i32, camera: DVec3) -> DVec3 {
     DVec3::new(
         f64::from(key.0 * 16),
-        f64::from(crate::chunk::MIN_Y + key.1 * 16),
+        f64::from(min_y + key.1 * 16),
         f64::from(key.2 * 16),
     ) - camera
 }
@@ -170,7 +176,7 @@ fn in_view(key: SectionKey, camera: DVec3, radius: i32, frustum: &Frustum) -> Op
     if !in_view_distance(camera_column(camera), radius, key.0, key.2) {
         return None;
     }
-    in_frustum(key, camera, frustum, false)
+    in_frustum(key, crate::chunk::MIN_Y, camera, frustum, false)
 }
 
 /// `in_view` without the distance test; `inside`: the section's column is
@@ -178,11 +184,12 @@ fn in_view(key: SectionKey, camera: DVec3, radius: i32, frustum: &Frustum) -> Op
 #[cfg(test)]
 fn in_frustum(
     key: SectionKey,
+    min_y: i32,
     camera: DVec3,
     frustum: &Frustum,
     inside: bool,
 ) -> Option<(f64, Vec3)> {
-    let origin = origin(key, camera);
+    let origin = origin(key, min_y, camera);
     let min = origin.as_vec3();
     if !inside && !frustum.intersects(min, min + Vec3::splat(16.0)) {
         return None;
@@ -220,8 +227,8 @@ impl<T> Resident<T> {
             }
             let col_ox = f64::from(column.x * 16) - camera.x;
             let col_oz = f64::from(column.z * 16) - camera.z;
-            let low_oy = f64::from(crate::chunk::MIN_Y + column.low * 16) - camera.y;
-            let high_oy = f64::from(crate::chunk::MIN_Y + column.high * 16) - camera.y;
+            let low_oy = f64::from(self.min_y + column.low * 16) - camera.y;
+            let high_oy = f64::from(self.min_y + column.high * 16) - camera.y;
             let min = Vec3::new(col_ox as f32, low_oy as f32, col_oz as f32);
             let max = Vec3::new(col_ox as f32 + 16.0, high_oy as f32 + 16.0, col_oz as f32 + 16.0);
             let inside = frustum.contains(min, max);
@@ -235,7 +242,7 @@ impl<T> Resident<T> {
                 }
                 let sec_origin = DVec3::new(
                     col_ox,
-                    f64::from(crate::chunk::MIN_Y + y * 16) - camera.y,
+                    f64::from(self.min_y + y * 16) - camera.y,
                     col_oz,
                 );
                 let sec_min = sec_origin.as_vec3();
@@ -299,7 +306,7 @@ mod tests {
                         if near {
                             in_view(k, camera, radius, &frustum).filter(|_| reachable(k))
                         } else if beyond(k.0, k.2) {
-                            in_frustum(k, camera, &frustum, false)
+                            in_frustum(k, crate::chunk::MIN_Y, camera, &frustum, false)
                         } else {
                             None
                         }
@@ -342,8 +349,8 @@ mod tests {
             .columns
             .iter()
             .filter(|c| {
-                let min = origin((c.x, c.low, c.z), camera).as_vec3();
-                let top = origin((c.x, c.high, c.z), camera).as_vec3();
+                let min = origin((c.x, c.low, c.z), crate::chunk::MIN_Y, camera).as_vec3();
+                let top = origin((c.x, c.high, c.z), crate::chunk::MIN_Y, camera).as_vec3();
                 frustum.contains(min, top + Vec3::splat(16.0))
             })
             .count();
