@@ -79,9 +79,13 @@ struct TerrainOut {
 // (16 per level), a vertex at camera-relative `pos` gets from the frame's light sources, one
 // level less per block. time.z of them are set: none when the extra is off, so no loop runs.
 fn dynamic_block_light(pos: vec3<f32>) -> f32 {
-    let count = min(u32(globals.time.z), 16u);
+    let count = u32(globals.time.z);
+    if count == 0u {
+        return 0.0;
+    }
+    let n = min(count, 16u);
     var level = 0.0;
-    for (var i = 0u; i < count; i++) {
+    for (var i = 0u; i < n; i++) {
         let l = globals.dynamic_lights[i];
         level = max(level, l.w - distance(pos, l.xyz));
     }
@@ -133,13 +137,14 @@ fn terrain_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f3
     return out;
 }
 fn linear_fog(d: f32, start: f32, end: f32) -> f32 {
-    if d <= start { return 0.0; }
-    if d >= end { return 1.0; }
-    return (d - start) / (end - start);
+    return clamp((d - start) / (end - start), 0.0, 1.0);
 }
 fn apply_fog(color: vec4<f32>, spherical: f32, cylindrical: f32) -> vec4<f32> {
     let f = max(linear_fog(spherical, globals.fog.x, globals.fog.y),
                 linear_fog(cylindrical, globals.fog.z, globals.fog.w));
+    if f <= 0.0 {
+        return color;
+    }
     return vec4(mix(color.rgb, globals.fog_color.rgb, f * globals.fog_color.a), color.a);
 }
 @fragment fn fs_solid(in: TerrainOut) -> @location(0) vec4<f32> {

@@ -10,7 +10,8 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 pub const REPO: &str = "jabirking-ux/horizon-offline";
-pub const README_URL: &str = "https://github.com/jabirking-ux/horizon-offline/blob/main/launcher/README.md";
+pub const README_URL: &str =
+    "https://github.com/jabirking-ux/horizon-offline/blob/main/launcher/README.md";
 /// The players' page on connecting an AI agent (the website's docs/agents.md).
 pub const AGENT_DOCS_URL: &str = "https://jabirking-ux.github.io/horizon-offline-site/";
 /// This launcher's version: the release workflow sets `HORIZON_LAUNCHER_VERSION` from the
@@ -1324,15 +1325,16 @@ fn download_for_owner(
     log: &dyn Fn(String),
 ) -> Result<(), String> {
     let v = &pins.version;
-    log(format!("Downloading Minecraft {v} directly from Mojang endpoints"));
+    log(format!(
+        "Downloading Minecraft {v} directly from Mojang endpoints"
+    ));
     let os = match sources::Os::current() {
         sources::Os::Linux => "linux",
         sources::Os::MacOs => "osx",
         sources::Os::Windows => "windows",
     };
-    mojang::download(pins, dir, os, 8, fetch, &mojang::CANCEL, log).map_err(|e| {
-        format!("\n  • Horizon tried to download {v} from Mojang, but: {e}")
-    })
+    mojang::download(pins, dir, os, 8, fetch, &mojang::CANCEL, log)
+        .map_err(|e| format!("\n  • Horizon tried to download {v} from Mojang, but: {e}"))
 }
 
 /// Downloads Minecraft `id` (any version on Mojang's list, its version file's sha1 from it) into
@@ -1454,15 +1456,19 @@ fn download_for(
     log: &dyn Fn(String),
 ) -> Result<(), String> {
     let v = &pins.version;
-    log(format!("Downloading Minecraft {v} directly from Mojang endpoints"));
+    log(format!(
+        "Downloading Minecraft {v} directly from Mojang endpoints"
+    ));
     let os = match sources::Os::current() {
         sources::Os::Linux => "linux",
         sources::Os::MacOs => "osx",
         sources::Os::Windows => "windows",
     };
     mojang::download(pins, dir, os, 8, fetch, &mojang::CANCEL, log).map_err(|e| {
-        format!("
-  • Horizon tried to download {v} from Mojang, but: {e}")
+        format!(
+            "
+  • Horizon tried to download {v} from Mojang, but: {e}"
+        )
     })
 }
 
@@ -1666,7 +1672,8 @@ pub fn preparer(
                     sources::Resolved::Folder(dir) => dir,
                     sources::Resolved::NotFound(checked) => {
                         let not_found = sources::not_found(&version, &checked, minecraft);
-                        download_for_owner(&pins, &chosen, &fetch, log).map_err(|e| not_found + &e)?;
+                        download_for_owner(&pins, &chosen, &fetch, log)
+                            .map_err(|e| not_found + &e)?;
                         chosen.clone()
                     }
                 }
@@ -2238,8 +2245,8 @@ pub fn need_prepared(tag: &str) -> Result<(), String> {
 /// the gate, a sign-in that can't be renewed (no network, expired) still lets the game start,
 /// offline.
 pub fn client(tag: &str) -> Result<Command, String> {
-    let (session, offline) = account::session_for_game(&game_home(), true)
-        .map_err(|refused| format!("{refused}"))?;
+    let (session, offline) =
+        account::session_for_game(&game_home(), true).map_err(|refused| format!("{refused}"))?;
     need_prepared(tag)?;
     complete_assets(tag);
     crate::browser::horizon::before_play(&game_home());
@@ -3951,7 +3958,10 @@ mod tests {
         let defaults = Links::default();
         assert_eq!(defaults.discord, "https://discord.gg/HcTeMZxe5E");
         assert_eq!(defaults.sponsor, "https://github.com/sponsors/ludovic111");
-        assert_eq!(defaults.website, "https://jabirking-ux.github.io/horizon-offline-site");
+        assert_eq!(
+            defaults.website,
+            "https://jabirking-ux.github.io/horizon-offline-site"
+        );
         // The file on main says the same thing as the defaults.
         let file = Links::parse(
             r#"{"discord": "https://discord.gg/HcTeMZxe5E", "sponsor": "https://github.com/sponsors/ludovic111", "website": "https://jabirking-ux.github.io/horizon-offline-site"}"#,

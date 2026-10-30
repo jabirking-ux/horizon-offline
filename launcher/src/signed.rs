@@ -27,7 +27,13 @@ pub fn digest(
     let sums = fetch(&asset_url(tag, SUMS))?;
     let signature = fetch(&asset_url(tag, SIGNATURE))?
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
-    match horizon_release_sign::signed_digest(tag, asset, sums.as_deref(), signature.as_deref(), keys) {
+    match horizon_release_sign::signed_digest(
+        tag,
+        asset,
+        sums.as_deref(),
+        signature.as_deref(),
+        keys,
+    ) {
         Ok(d) => Ok(d),
         Err(e) => {
             if signature.is_none() {

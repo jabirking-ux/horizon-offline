@@ -3141,15 +3141,23 @@ impl Renderer {
     ) {
         let (draws, pages) = (&self.draws[..], &self.draw_pages[..]);
         let (mut i, end) = (first as usize, (first + count) as usize);
+        let mut bound_page: Option<u32> = None;
+        let mut bound_index_page: Option<Option<u32>> = None;
         while i < end {
             let (page, index_page) = pages[i];
             let run = pages[i..end]
                 .iter()
                 .take_while(|&&p| p == (page, index_page))
                 .count();
-            pass.set_vertex_buffer(0, self.arena.buffer(page).slice(..));
-            let indices = index_page.map_or(&self.indices, |p| self.sorted_indices.buffer(p));
-            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+            if bound_page != Some(page) {
+                pass.set_vertex_buffer(0, self.arena.buffer(page).slice(..));
+                bound_page = Some(page);
+            }
+            if bound_index_page != Some(index_page) {
+                let indices = index_page.map_or(&self.indices, |p| self.sorted_indices.buffer(p));
+                pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                bound_index_page = Some(index_page);
+            }
             if self.multi_draw {
                 let offset = (i - base as usize) as u64 * 20;
                 pass.multi_draw_indexed_indirect(indirect, offset, run as u32);
@@ -4035,6 +4043,7 @@ impl Renderer {
             });
         }
         self.origins.clear();
+        self.origins.reserve(visible.len() + visible_lods.len() + shadow_visible.len());
         self.origins.extend(
             visible
                 .iter()
@@ -4054,6 +4063,9 @@ impl Renderer {
         // as one list of indirect draws over the section arena.
         self.draws.clear();
         self.draw_pages.clear();
+        let expected_draws = visible.len() * 3 + visible_lods.len();
+        self.draws.reserve(expected_draws);
+        self.draw_pages.reserve(expected_draws);
         // Occlusion culling leaves the sections its last result did not see
         // to phase 2, after the others, with instance counts of 0. Whether
         // the frame has draws enough goes by the last one's.
@@ -5801,6 +5813,7 @@ fn projection_center(view_proj: Mat4) -> Option<Vec3> {
 /// Calls `draw(first, quads)` for each run of a mesh's solid quads that can
 /// face `eye` (`projection_center`), the mesh at the camera-relative
 /// `origin`; all of them when there is no eye.
+#[inline]
 fn facing_runs(sides: &Sides, eye: Option<Vec3>, origin: [f32; 3], mut draw: impl FnMut(u32, u32)) {
     match eye {
         Some(eye) => sides.visible((eye - Vec3::from(origin)).to_array(), draw),

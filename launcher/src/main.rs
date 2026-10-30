@@ -4209,7 +4209,10 @@ mod tests {
             play_press(false, Some(true), false),
             PlayPress::PrepareThenPlay
         );
-        assert_eq!(play_press(false, Some(false), false), PlayPress::PrepareThenPlay);
+        assert_eq!(
+            play_press(false, Some(false), false),
+            PlayPress::PrepareThenPlay
+        );
         assert_eq!(play_press(false, None, false), PlayPress::PrepareThenPlay);
         assert_eq!(play_press(false, Some(true), true), PlayPress::Nothing);
         assert_eq!(play_press(true, Some(true), true), PlayPress::Nothing);

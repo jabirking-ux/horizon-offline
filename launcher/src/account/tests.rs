@@ -525,7 +525,9 @@ fn offline_names_play_only_beside_an_owner() {
     assert!(accounts.has_owner(&store));
     let (_, ep) = mock(|_| {});
     assert!(launch(&ep, Some("test-client"), &store, &mut accounts).is_ok());
-    assert!(accounts.play_as(&store, Player::Offline("Builder_2".into())).is_ok());
+    assert!(accounts
+        .play_as(&store, Player::Offline("Builder_2".into()))
+        .is_ok());
 }
 
 #[test]

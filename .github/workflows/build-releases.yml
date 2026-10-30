@@ -26,14 +26,17 @@ jobs:
             target: x86_64-unknown-linux-gnu
             binary: horizon-launcher
             asset: horizon-launcher-linux-x86_64.tar.gz
+            game_asset: horizon-linux-x86_64.tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary: horizon-launcher.exe
             asset: horizon-launcher-windows-x64.zip
+            game_asset: horizon-windows-x64.zip
           - os: macos-latest
             target: aarch64-apple-darwin
             binary: horizon-launcher
             asset: horizon-launcher-macos-arm64.tar.gz
+            game_asset: ''
 
     steps:
       - name: Checkout repository
@@ -52,6 +55,35 @@ jobs:
 
       - name: Build Launcher
         run: cargo build --profile dist --manifest-path launcher/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Build Game (Windows)
+        if: runner.os == 'Windows'
+        run: cargo build --release -p horizon-client --bin horizon-client -p horizon-ctl --bin horizon-ctl -p horizon-prepare --bin horizon-prepare -p horizon-server --bin horizon-server
+
+      - name: Package Game (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path game-dist/horizon-windows-x64 -Force
+          Copy-Item target/release/horizon-client.exe game-dist/horizon-windows-x64/
+          Copy-Item target/release/horizon-ctl.exe game-dist/horizon-windows-x64/
+          Copy-Item target/release/horizon-prepare.exe game-dist/horizon-windows-x64/
+          Copy-Item target/release/horizon-server.exe game-dist/horizon-windows-x64/
+          Copy-Item -Recurse crates, exporters, mods, tools game-dist/horizon-windows-x64/
+          Copy-Item PLAY.txt, research-lock.json, LICENSE game-dist/horizon-windows-x64/
+          Compress-Archive -Path game-dist/horizon-windows-x64/* -DestinationPath horizon-windows-x64.zip
+
+      - name: Build Game (Linux)
+        if: runner.os == 'Linux'
+        run: cargo build --release -p horizon-client --bin horizon-client -p horizon-ctl --bin horizon-ctl -p horizon-prepare --bin horizon-prepare -p horizon-server --bin horizon-server
+
+      - name: Package Game (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p game-dist/horizon-linux-x86_64
+          cp target/release/horizon-client target/release/horizon-ctl target/release/horizon-prepare target/release/horizon-server game-dist/horizon-linux-x86_64/
+          cp -r crates exporters mods tools PLAY.txt research-lock.json LICENSE game-dist/horizon-linux-x86_64/
+          tar -czf horizon-linux-x86_64.tar.gz -C game-dist horizon-linux-x86_64
 
       - name: Package Artifact (Linux / macOS)
         if: runner.os != 'Windows'
@@ -79,9 +111,10 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
+          name: artifacts-${{ matrix.os }}
           path: |
             ${{ matrix.asset }}
+            ${{ matrix.game_asset }}
             Borizon-Setup.exe
           if-no-files-found: ignore
 
@@ -113,10 +146,12 @@ jobs:
         run: |
           TAG_NAME="${TAG:-v0.2.32-offline}"
           {
-            echo "Horizon Offline: more optimized, fully offline."
+            echo "Borizon Offline: high-FPS optimized, fully offline."
             echo ""
-            echo "- No Microsoft account, Xbox Live or keyring code."
-            echo "- The prepare step downloads the client, libraries, assets and sounds straight from Mojang and checks every SHA-1."
-            echo "- Launch offline once setup is done."
+            echo "- Direct Mojang downloads with zero Microsoft account dependency."
+            echo "- Hardware early-Z rasterization bypasses multi-pass occlusion stalls on integrated GPUs."
+            echo "- Immediate presentation mode fallback prevents 36 FPS lock."
+            echo "- Native vectorization and branchless WGSL shaders."
+            echo "- Fully packaged installer and game binaries."
           } > notes.md
-          gh release create "$TAG_NAME" release-dist/* --title "Horizon Offline $TAG_NAME" --notes-file notes.md --target "$GITHUB_SHA"
+          gh release create "$TAG_NAME" release-dist/* --title "Borizon $TAG_NAME" --notes-file notes.md --target "$GITHUB_SHA" || gh release upload "$TAG_NAME" release-dist/* --clobber

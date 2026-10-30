@@ -187,9 +187,7 @@ fn portal_layer(p: vec4<f32>, layer: f32) -> vec4<f32> {
     return vec4(0.5 * v.x + 0.25 * v.w, 0.5 * v.y + 0.25 * v.w, v.z, v.w);
 }
 fn linear_fog(d: f32, start: f32, end: f32) -> f32 {
-    if d <= start { return 0.0; }
-    if d >= end { return 1.0; }
-    return (d - start) / (end - start);
+    return clamp((d - start) / (end - start), 0.0, 1.0);
 }
 // TextureTransform.setupGlintTexturing(0.16), ARMOR_ENTITY_GLINT_TEXTURING.
 // globals.time.w is (Util.getMillis() * glintSpeed * 8) modulo 330000, the
