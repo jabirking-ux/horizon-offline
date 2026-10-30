@@ -196,7 +196,7 @@ impl Cull {
             {
                 DepthTest::Early
             }
-            wgpu::Backend::Metal => DepthTest::InShader,
+            wgpu::Backend::Metal | wgpu::Backend::Dx12 | wgpu::Backend::Vulkan => DepthTest::InShader,
             _ => return None,
         };
         (device

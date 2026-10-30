@@ -21,6 +21,7 @@ const BAND: f64 = 64.0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Run {
     key: u64,
+    order: u32,
     pub start: u32,
     pub len: u32,
     /// The caller's data, carried along (occlusion culling's test inputs).
@@ -43,8 +44,10 @@ impl PageRuns {
     pub fn push(&mut self, distance: u64, page: u32, start: usize, len: usize, tag: [u32; 3]) {
         if len > 0 {
             let band = (f64::from_bits(distance).sqrt() / BAND) as u64;
+            let order = self.runs.len() as u32;
             self.runs.push(Run {
                 key: band << 32 | u64::from(page),
+                order,
                 start: start as u32,
                 len: len as u32,
                 tag,
@@ -65,8 +68,8 @@ impl PageRuns {
         if self.runs.windows(2).all(|w| page(&w[0]) == page(&w[1])) {
             return &self.runs;
         }
-        // Stable: within a band and page the runs stay nearest first.
-        self.runs.sort_by_key(|r| r.key);
+        // Zero-allocation in-place sort: within a band and page the runs stay nearest first via insertion order.
+        self.runs.sort_unstable_by_key(|r| (r.key, r.order));
         self.scratch.clear();
         for r in &mut self.runs {
             let (s, e) = (r.start as usize, (r.start + r.len) as usize);

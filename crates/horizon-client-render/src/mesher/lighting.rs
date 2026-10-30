@@ -292,8 +292,16 @@ pub(super) fn ambient_occlusion(
     let adjacency = &ADJACENCY[face as usize];
     let corner = |i: usize| step(base, adjacency.corners[i]);
     let sample = |p: [i32; 3]| {
-        let s = state(pad, info, p);
-        (coords(pad, s, p), s.shade)
+        let idx = pi(p[0], p[1], p[2]);
+        let s = &info[pad.blocks[idx] as usize];
+        let c = if s.emissive {
+            FULL_BRIGHT
+        } else {
+            let packed = pad.light[idx];
+            let block = u32::from((packed & 15).max(s.emission));
+            block << 4 | u32::from(packed >> 4) << 20
+        };
+        (c, s.shade)
     };
     let (light0, shade0) = sample(corner(0));
     let (light1, shade1) = sample(corner(1));
