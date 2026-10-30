@@ -1178,6 +1178,8 @@ impl Renderer {
                 .unwrap_or_else(|| {
                     if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
                         wgpu::PresentMode::Mailbox
+                    } else if caps.present_modes.contains(&wgpu::PresentMode::Immediate) {
+                        wgpu::PresentMode::Immediate
                     } else {
                         wgpu::PresentMode::Fifo
                     }
@@ -4070,7 +4072,7 @@ impl Renderer {
                 self.cull_on
                     && !frame.title
                     && !pack_terrain
-                    && (self.multi_draw || self.flat.is_some())
+                    && self.multi_draw
                     && visible.len() >= c.min_sections
             })
             .and_then(|cull| cull.begin(&self.device).then_some(cull));
