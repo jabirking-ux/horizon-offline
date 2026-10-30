@@ -437,7 +437,7 @@ impl Launcher {
             sign_in: None,
             sign_in_state: None,
             keychain: None,
-            owner: None,
+            owner: Some(true),
             owner_screen_open: false,
             dev_clicks: 0,
             dev_options: false,
@@ -1675,12 +1675,11 @@ enum PlayPress {
 }
 
 /// `owner`: whether an account here owns the game, by the keychain (`Launcher::owner`).
-fn play_press(prepared: bool, owner: Option<bool>, busy: bool) -> PlayPress {
-    match (prepared, owner) {
-        _ if busy => PlayPress::Nothing,
-        (true, _) => PlayPress::Play,
-        (false, Some(true)) => PlayPress::PrepareThenPlay,
-        (false, _) => PlayPress::Nothing,
+fn play_press(prepared: bool, _owner: Option<bool>, busy: bool) -> PlayPress {
+    match (prepared, busy) {
+        (_, true) => PlayPress::Nothing,
+        (true, false) => PlayPress::Play,
+        (false, false) => PlayPress::PrepareThenPlay,
     }
 }
 
@@ -2513,28 +2512,18 @@ impl Launcher {
                     .child(play),
             );
 
-        // Not prepared: an owner can have Horizon download Minecraft from Mojang; without an
-        // owner there is nothing to play, so signing in comes first.
-        let first = (!prepared && !self.preparing)
-            .then_some(self.owner_shown())
-            .flatten();
-        // No launcher folder with Minecraft on this computer: an owner needs none.
+        // Not prepared: direct Mojang download or local install (no Microsoft account needed)
         let no_install = self.settings.minecraft_dir.is_none();
-        let resources_value = match first {
-            _ if self.preparing => tr("Preparing…").to_string(),
-            Some(true) if no_install => trf(
-                "Not prepared. Play downloads Minecraft {version} from Mojang for your account and prepares it.",
-                &[("version", &version)],
-            ),
-            Some(true) => trf(
-                "Not prepared. Horizon can download Minecraft {version} from Mojang for your account, or use your own install.",
-                &[("version", &version)],
-            ),
-            Some(false) => trf(
-                "Not prepared. Sign in with the Microsoft account that owns Minecraft {version} first.",
-                &[("version", &version)],
-            ),
-            None => backend::resources_summary(prepared, !silent, &version),
+        let resources_value = if self.preparing {
+            tr("Preparing…").to_string()
+        } else if !prepared {
+            if no_install {
+                format!("Not prepared. Play downloads Minecraft {version} directly from Mojang and prepares it.")
+            } else {
+                format!("Not prepared. Horizon can download Minecraft {version} directly from Mojang, or use your own install.")
+            }
+        } else {
+            backend::resources_summary(prepared, !silent, &version)
         };
         let mut prepare = button(
             "prepare",
@@ -2550,34 +2539,16 @@ impl Launcher {
             prepare = disabled(prepare);
         } else {
             prepare = prepare.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.prepare(backend::MinecraftFrom::Install);
+                this.prepare(backend::MinecraftFrom::Mojang);
                 cx.notify();
             }));
         }
-        let prepare = match first {
-            Some(true) if no_install => div().child(
-                button(
-                    "prepare-download",
-                    "Download and prepare",
-                    Kind::Secondary,
-                    &t,
-                )
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.prepare(backend::MinecraftFrom::Mojang);
-                    cx.notify();
-                })),
-            ),
-            Some(true) => div()
+        let prepare = if self.preparing {
+            div().child(disabled(prepare))
+        } else if !prepared {
+            div()
                 .flex()
                 .gap(px(8.))
-                .child(
-                    button("prepare-install", "From my install", Kind::Ghost, &t).on_click(
-                        cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.prepare(backend::MinecraftFrom::Install);
-                            cx.notify();
-                        }),
-                    ),
-                )
                 .child(
                     button(
                         "prepare-download",
@@ -2589,16 +2560,19 @@ impl Launcher {
                         this.prepare(backend::MinecraftFrom::Mojang);
                         cx.notify();
                     })),
-                ),
-            Some(false) => div().child(
-                button("prepare-sign-in", "Sign in", Kind::Secondary, &t).on_click(cx.listener(
-                    |this, _: &ClickEvent, _, cx| {
-                        this.sign_in_to_play();
-                        cx.notify();
-                    },
-                )),
-            ),
-            None => div().child(prepare),
+                )
+                .when(!no_install, |d| {
+                    d.child(
+                        button("prepare-install", "From my install", Kind::Ghost, &t).on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.prepare(backend::MinecraftFrom::Install);
+                                cx.notify();
+                            }),
+                        ),
+                    )
+                })
+        } else {
+            div().child(prepare)
         };
         let owner = self.owner == Some(true);
         let minecraft = self.settings.minecraft_dir.as_deref().map_or_else(
@@ -3652,102 +3626,12 @@ impl Launcher {
                 &t,
             ));
         }
-        let configured = account::client_id().is_some();
-        let busy = matches!(
-            self.sign_in_state,
-            Some(SignInState::Starting | SignInState::Code(_))
-        );
-        let detail = match &self.sign_in_state {
-            _ if !configured => div().child(tr(account::NOT_CONFIGURED)),
-            Some(SignInState::Starting) => div().child(tr("Asking Microsoft…")),
-            Some(SignInState::Code(code)) => div()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(trf(
-                    "Open {link} in your browser and enter this code:",
-                    &[("link", &code.verification_uri)],
-                ))
-                .child(
-                    text(theme::HEADING)
-                        .font_family(theme::MONO)
-                        .text_color(t.ink)
-                        .child(code.user_code.clone()),
-                ),
-            Some(SignInState::Done(Ok(a))) => div().child(format!("Signed in as {}.", a.name)),
-            Some(SignInState::Done(Err(e))) => div().text_color(t.danger).child(e.clone()),
-            None if self.accounts.accounts.is_empty() => div().child(tr(
-                "Horizon needs a Microsoft account that owns Minecraft: Java Edition, like other launchers. It also plays online servers with your name and skin.",
-            )),
-            None => div().child(tr("Add another account.")),
-        };
-        let detail = match self.keychain.clone() {
-            Some(said) if !self.accounts.accounts.is_empty() => div()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .child(detail)
-                .child(div().child(said)),
-            _ => detail,
-        };
-        let action = if !configured {
-            None
-        } else if let Some(SignInState::Code(code)) = &self.sign_in_state {
-            let (uri, user_code) = (code.verification_uri.clone(), code.user_code.clone());
-            Some(
-                div()
-                    .flex()
-                    .gap(px(4.))
-                    .child(
-                        button("sign-in-copy", "Copy code", Kind::Secondary, &t).on_click(
-                            move |_, _, cx| {
-                                copy_to_clipboard(
-                                    cx,
-                                    gpui::ClipboardItem::new_string(user_code.clone()),
-                                )
-                            },
-                        ),
-                    )
-                    .child(
-                        button("sign-in-open", "Open link", Kind::Secondary, &t)
-                            .on_click(move |_, _, cx| cx.open_url(&uri)),
-                    )
-                    .child(
-                        button("sign-in-cancel", "Cancel", Kind::Ghost, &t).on_click(cx.listener(
-                            |this, _: &ClickEvent, _, cx| {
-                                if let Some(s) = this.sign_in.take() {
-                                    s.cancel();
-                                }
-                                this.sign_in_state = None;
-                                cx.notify();
-                            },
-                        )),
-                    )
-                    .into_any_element(),
-            )
-        } else if busy {
-            None
-        } else {
-            Some(
-                button("sign-in", "Sign in with Microsoft", Kind::Secondary, &t)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.start_sign_in();
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            )
-        };
         n += 1;
-        let title = if self.accounts.accounts.is_empty() {
-            "Microsoft account"
-        } else {
-            "Another account"
-        };
         rows = rows.child(index_row(
             n,
-            tr(title),
-            Some(detail.into_any_element()),
-            action,
+            "Offline mode",
+            Some(div().child("Horizon Offline runs completely without Microsoft accounts or sign-in requirements. Files are fetched directly from Mojang.").into_any_element()),
+            None,
             &t,
         ));
         (rows, n)
@@ -4581,7 +4465,7 @@ fn main() {
                     titlebar: Some(titlebar::options()),
                     #[cfg(target_os = "linux")]
                     window_decorations: Some(gpui::WindowDecorations::Client),
-                    app_id: Some("horizon-launcher".into()),
+                    app_id: Some("dev.playhorizon.offline.launcher".into()),
                     ..Default::default()
                 },
                 |window, cx| cx.new(|cx| Launcher::new(window, cx)),
@@ -4633,8 +4517,8 @@ mod tests {
             play_press(false, Some(true), false),
             PlayPress::PrepareThenPlay
         );
-        assert_eq!(play_press(false, Some(false), false), PlayPress::Nothing);
-        assert_eq!(play_press(false, None, false), PlayPress::Nothing);
+        assert_eq!(play_press(false, Some(false), false), PlayPress::PrepareThenPlay);
+        assert_eq!(play_press(false, None, false), PlayPress::PrepareThenPlay);
         assert_eq!(play_press(false, Some(true), true), PlayPress::Nothing);
         assert_eq!(play_press(true, Some(true), true), PlayPress::Nothing);
     }

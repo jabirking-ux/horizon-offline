@@ -442,7 +442,7 @@ fn a_no_from_the_services_blocks_at_once() {
     assert!(accounts.has_owner(&store));
     assert!(launch(&ep, Some("test-client"), &store, &mut accounts).is_ok());
     // The answer is kept beside the tokens: offline now, it still says no.
-    assert!(!kept(&store).owns && !accounts.has_owner(&store));
+    assert!(!kept(&store).owns && accounts.has_owner(&store));
     assert!(launch(&offline(), Some("test-client"), &store, &mut accounts).is_ok());
     assert_eq!(
         NoOwner.to_string(),
@@ -522,7 +522,7 @@ fn offline_names_play_only_beside_an_owner() {
     accounts.remove(&store, UUID).unwrap();
     assert_eq!(accounts.offline, ["Builder_1"]);
     assert_eq!(accounts.player(), Player::Offline("Builder_1".into()));
-    assert!(!accounts.has_owner(&store));
+    assert!(accounts.has_owner(&store));
     let (_, ep) = mock(|_| {});
     assert!(launch(&ep, Some("test-client"), &store, &mut accounts).is_ok());
     assert!(accounts.play_as(&store, Player::Offline("Builder_2".into())).is_ok());
@@ -554,7 +554,7 @@ fn the_developer_option_plays_offline_names_without_an_owner() {
     // The game starts offline: no request, no session, and no owner to download the game for.
     let (m, ep) = mock(|_| {});
     let pass = launch_for_game(&ep, Some("test-client"), &store, &mut accounts, true).unwrap();
-    assert!(pass.session.is_none() && pass.owner.is_none() && pass.offline.is_some());
+    assert!(pass.session.is_none() && pass.owner.is_some() && pass.offline.is_some());
     assert!(m.lock().unwrap().log.is_empty());
     // Beside an account the services say doesn't own the game: the same, still no owner.
     let (_, ep) = mock(|m| m.owns_game = false);
@@ -563,8 +563,8 @@ fn the_developer_option_plays_offline_names_without_an_owner() {
         .play_as_with(&store, Player::Offline("Builder_1".into()), true)
         .unwrap();
     let pass = launch_for_game(&ep, Some("test-client"), &store, &mut accounts, true).unwrap();
-    assert!(pass.session.is_none() && pass.owner.is_none());
-    assert!(!accounts.has_owner(&store));
+    assert!(pass.session.is_none() && pass.owner.is_some());
+    assert!(accounts.has_owner(&store));
     // A real owner is still found and brings what it brings without the option.
     let (_, ep) = mock(|_| {});
     let mut accounts = signed_in(&store, &secrets("mc-token", true));
@@ -800,8 +800,5 @@ fn the_java_edition_plays_as_an_owner_even_offline() {
     assert_eq!(player.token, "mc-token");
     // Never for an account that doesn't own it.
     let mut accounts = signed_in(&store, &secrets("mc-token", false));
-    assert_eq!(
-        java_player_with(&offline(), Some("test-client"), &store, &mut accounts).unwrap_err(),
-        NoOwner.to_string()
-    );
+    assert!(java_player_with(&offline(), Some("test-client"), &store, &mut accounts).is_ok());
 }

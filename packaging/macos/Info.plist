@@ -1,22 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Horizon.app's Info.plist; package.sh fills in @VERSION@ from launcher/Cargo.toml. -->
+<!-- Horizon Offline Info.plist -->
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>Horizon</string>
+	<string>Horizon Offline</string>
 	<key>CFBundleExecutable</key>
 	<string>horizon-launcher</string>
 	<key>CFBundleIconFile</key>
 	<string>horizon</string>
 	<key>CFBundleIdentifier</key>
-	<string>dev.horizon.launcher</string>
+	<string>dev.playhorizon.offline.launcher</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Horizon</string>
+	<string>Horizon Offline</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -30,6 +30,6 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>Horizon is MIT licensed. Not an official Minecraft product; not approved by or associated with Mojang or Microsoft.</string>
+	<string>Horizon Offline is MIT licensed. Not an official Minecraft product; not approved by or associated with Mojang or Microsoft.</string>
 </dict>
 </plist>

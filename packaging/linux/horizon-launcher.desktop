@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=Horizon
+Name=Horizon Offline
 GenericName=Game launcher
-Comment=Install, prepare and play Horizon, Minecraft: Java Edition 26.3 rewritten in Rust
+Comment=Install, prepare and play Horizon Offline directly from Mojang without Microsoft accounts
 Exec=horizon-launcher
 Icon=horizon
 Terminal=false
 Categories=Game;
-StartupWMClass=horizon-launcher
+StartupWMClass=horizon-offline-launcher

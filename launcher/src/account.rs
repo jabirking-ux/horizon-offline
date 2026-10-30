@@ -18,7 +18,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The keychain service name every secret is stored under.
-pub const SERVICE: &str = "dev.playhorizon.launcher";
+pub const SERVICE: &str = "dev.playhorizon.offline.launcher";
 const SCOPE: &str = "XboxLive.signin offline_access";
 pub const NOT_CONFIGURED: &str =
     "This build of the launcher has no Microsoft sign-in (HORIZON_MSA_CLIENT_ID), so it can't start the game.";
@@ -697,10 +697,8 @@ impl Accounts {
     }
     /// Whether an account here owned the game at its last check (the keychain's answer, no
     /// request): what Play and offline names need.
-    pub fn has_owner(&self, store: &dyn SecretStore) -> bool {
-        self.accounts
-            .iter()
-            .any(|a| secrets_in(store, &a.uuid).is_some_and(|s| s.owns))
+    pub fn has_owner(&self, _store: &dyn SecretStore) -> bool {
+        true
     }
 
     /// Who plays now.
@@ -924,14 +922,26 @@ pub fn launch(
             }
         }
     }
-    if owned {
-        Ok(pass)
-    } else {
-        // Horizon Offline Fork: Always permit offline play without Microsoft account
-        let name = accounts.name_arg().unwrap_or("HorizonPlayer");
+    if !owned {
+        // Horizon Offline Fork: Always permit offline play and direct download without Microsoft account
+        let name = accounts.name_arg().unwrap_or("HorizonPlayer").to_string();
+        let offline_account = Account {
+            uuid: "00000000000000000000000000000000".into(),
+            name: name.clone(),
+            skin: None,
+            cape: None,
+        };
+        let offline_secrets = Secrets {
+            refresh_token: String::new(),
+            minecraft_token: String::new(),
+            minecraft_expires_at: u64::MAX,
+            xuid: None,
+            owns: true,
+        };
+        pass.owner = Some((offline_account, offline_secrets));
         pass.offline = Some(format!("Playing offline as {name}"));
-        Ok(pass)
     }
+    Ok(pass)
 }
 
 /// The owner gate before the game starts. With the window's hidden developer option

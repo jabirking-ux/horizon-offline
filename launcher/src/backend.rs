@@ -454,7 +454,7 @@ pub fn data_dir() -> PathBuf {
     }
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("horizon-launcher")
+        .join("horizon-offline-launcher")
 }
 
 fn versions_dir() -> PathBuf {
@@ -1405,45 +1405,22 @@ pub fn java_game(
 fn download_for(
     pins: &sources::Pins,
     dir: &Path,
-    pass: Result<account::Launch, account::NoOwner>,
-    signed_in: bool,
+    _pass: Result<account::Launch, account::NoOwner>,
+    _signed_in: bool,
     fetch: sources::Fetch,
     log: &dyn Fn(String),
 ) -> Result<(), String> {
     let v = &pins.version;
-    match pass {
-        Ok(account::Launch {
-            owner: Some((owner, _)),
-            ..
-        }) => {
-            let name = owner.name;
-            log(format!(
-                "{name} owns Minecraft: downloading {v} from Mojang"
-            ));
-            let os = match sources::Os::current() {
-                sources::Os::Linux => "linux",
-                sources::Os::MacOs => "osx",
-                sources::Os::Windows => "windows",
-            };
-            mojang::download(pins, dir, os, 8, fetch, &mojang::CANCEL, log).map_err(|e| {
-                format!("\n  • Horizon tried to download {v} from Mojang for {name}, but: {e}")
-            })
-        }
-        // An owner by its last answer, who can't be asked now.
-        Ok(pass) => Err(format!(
-            "\n  • Downloading {v} from Mojang needs your Microsoft account, which could not be \
-             checked: {}",
-            pass.offline.unwrap_or_default()
-        )),
-        Err(_) if signed_in => Err(
-            "\n  • No signed-in account owns Minecraft: Java Edition, so Horizon can't download it."
-                .into(),
-        ),
-        Err(_) => Err(format!(
-            "\n  • Or sign in with the Microsoft account that owns Minecraft: Horizon then \
-             downloads {v} from Mojang itself."
-        )),
-    }
+    log(format!("Downloading Minecraft {v} directly from Mojang endpoints"));
+    let os = match sources::Os::current() {
+        sources::Os::Linux => "linux",
+        sources::Os::MacOs => "osx",
+        sources::Os::Windows => "windows",
+    };
+    mojang::download(pins, dir, os, 8, fetch, &mojang::CANCEL, log).map_err(|e| {
+        format!("
+  • Horizon tried to download {v} from Mojang, but: {e}")
+    })
 }
 
 /// The Java home for this version: a runtime for precompiled exporters, a JDK for older
@@ -1773,7 +1750,7 @@ pub fn game_home() -> PathBuf {
     }
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("horizon")
+        .join("horizon-offline")
 }
 
 /// Whether No AI is on: every AI feature hidden and off (`horizon_core::no_ai`, kept in the
@@ -3109,9 +3086,10 @@ mod tests {
             (no_owner(), false),
             (no_owner(), true),
         ] {
+            // Horizon Offline Fork: always attempts Mojang download directly (fails here without network in mock fetch)
             assert!(download_for(&pins, &dir, pass, signed_in, &fetch, &log).is_err());
         }
-        assert!(asked.lock().unwrap().is_empty());
+        assert!(!asked.lock().unwrap().is_empty());
         assert!(!dir.exists());
         // An owner: Mojang is asked (and the download fails here, without network).
         let owner = account::Account {
@@ -4455,7 +4433,7 @@ mod tests {
             std::env::temp_dir().join(format!("horizon-launcher-replace-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let exe = dir.join("horizon-launcher");
+        let exe = dir.join("horizon-offline-launcher");
         fs::write(&exe, "old").unwrap();
         // Another update swaps the file under the running launcher.
         fs::write(dir.join("other"), "other update").unwrap();
