@@ -16,12 +16,12 @@
 
 /// The width of a band, in blocks.
 const BAND: f64 = 64.0;
+const INV_BAND: f64 = 1.0 / BAND;
 
 /// One section's draws: `start..start + len` of the list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Run {
     key: u64,
-    order: u32,
     pub start: u32,
     pub len: u32,
     /// The caller's data, carried along (occlusion culling's test inputs).
@@ -31,23 +31,25 @@ pub(super) struct Run {
 #[derive(Default)]
 pub(super) struct PageRuns {
     runs: Vec<Run>,
-    scratch: Vec<([u32; 5], (u32, Option<u32>))>,
+    scratch_draws: Vec<[u32; 5]>,
+    scratch_pages: Vec<(u32, Option<u32>)>,
 }
 
 impl PageRuns {
+    #[inline]
     pub fn clear(&mut self) {
         self.runs.clear();
     }
 
     /// The draws `start..start + len` of a section `distance` from the
     /// camera (squared, as bits) in arena `page`; runs come nearest first.
+    #[inline]
     pub fn push(&mut self, distance: u64, page: u32, start: usize, len: usize, tag: [u32; 3]) {
         if len > 0 {
-            let band = (f64::from_bits(distance).sqrt() / BAND) as u64;
-            let order = self.runs.len() as u32;
+            let band = (f64::from_bits(distance).sqrt() * INV_BAND) as u64;
+            let order = self.runs.len() as u64;
             self.runs.push(Run {
-                key: band << 32 | u64::from(page),
-                order,
+                key: (band << 48) | ((u64::from(page) & 0xFFFF) << 32) | (order & 0xFFFF_FFFF),
                 start: start as u32,
                 len: len as u32,
                 tag,
@@ -64,23 +66,23 @@ impl PageRuns {
         pages: &mut [(u32, Option<u32>)],
         base: usize,
     ) -> &[Run] {
-        let page = |r: &Run| r.key as u32;
+        let page = |r: &Run| (r.key >> 32) as u16;
         if self.runs.windows(2).all(|w| page(&w[0]) == page(&w[1])) {
             return &self.runs;
         }
-        // Zero-allocation in-place sort: within a band and page the runs stay nearest first via insertion order.
-        self.runs.sort_unstable_by_key(|r| (r.key, r.order));
-        self.scratch.clear();
+        // Zero-allocation in-place 64-bit integer sort: within a band and page the runs stay nearest first via packed insertion order.
+        self.runs.sort_unstable_by_key(|r| r.key);
+        self.scratch_draws.clear();
+        self.scratch_pages.clear();
         for r in &mut self.runs {
             let (s, e) = (r.start as usize, (r.start + r.len) as usize);
-            r.start = (base + self.scratch.len()) as u32;
-            self.scratch
-                .extend(draws[s..e].iter().copied().zip(pages[s..e].iter().copied()));
+            r.start = (base + self.scratch_draws.len()) as u32;
+            self.scratch_draws.extend_from_slice(&draws[s..e]);
+            self.scratch_pages.extend_from_slice(&pages[s..e]);
         }
-        for (i, &(draw, p)) in self.scratch.iter().enumerate() {
-            draws[base + i] = draw;
-            pages[base + i] = p;
-        }
+        let n = self.scratch_draws.len();
+        draws[base..base + n].copy_from_slice(&self.scratch_draws);
+        pages[base..base + n].copy_from_slice(&self.scratch_pages);
         &self.runs
     }
 }

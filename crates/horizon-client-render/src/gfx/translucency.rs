@@ -8,23 +8,29 @@ pub fn quad_center(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 
 #[derive(Default)]
 pub struct Sorter {
-    order: Vec<(u32, f32)>,
+    order: Vec<u64>,
     indices: Vec<u32>,
 }
 
 impl Sorter {
+    #[inline]
     pub fn sort(&mut self, centers: &[[f32; 3]], camera: [f32; 3]) -> &[u32] {
         self.order.clear();
+        self.order.reserve(centers.len());
         self.order.extend(centers.iter().enumerate().map(|(i, c)| {
             let [x, y, z] = std::array::from_fn(|j| camera[j] - c[j]);
-            (i as u32, x * x + y * y + z * z)
+            let d = x * x + y * y + z * z;
+            // Squared distance is always >= +0.0, so IEEE-754 bits order monotonically.
+            // Invert distance bits in the high 32 bits for descending distance order, and
+            // keep quad index in the low 32 bits for ascending tie-breaking (zero-alloc sort).
+            ((!d.to_bits() as u64) << 32) | (i as u64)
         }));
-        // VertexSorting uses a stable merge sort, preserving mesh order for ties.
-        self.order.sort_by(|a, b| b.1.total_cmp(&a.1));
+        self.order.sort_unstable();
         self.indices.clear();
-        for &(quad, _) in &self.order {
-            let v = quad * 4;
-            self.indices.extend([v, v + 1, v + 2, v + 2, v + 3, v]);
+        self.indices.reserve(self.order.len() * 6);
+        for &packed in &self.order {
+            let v = (packed as u32) * 4;
+            self.indices.extend_from_slice(&[v, v + 1, v + 2, v + 2, v + 3, v]);
         }
         &self.indices
     }

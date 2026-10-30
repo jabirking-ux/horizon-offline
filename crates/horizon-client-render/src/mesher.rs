@@ -183,18 +183,23 @@ impl SectionMesh {
 pub const ALL_VISIBLE: u64 = (1 << 36) - 1;
 /// VisGraph.resolve: flood fill non-opaque cells and connect the faces each region touches.
 fn visibility(pad: &Padded, info: &[Info]) -> u64 {
-    // Opaque cells are already visited: resolve each state's opacity once,
-    // then reuse this map for the flood fill and the uniform-section shortcuts.
-    let mut seen = [false; 4096];
-    let mut opaque_count = 0;
+    // Opaque cells are already visited: resolve each state's opacity once into a
+    // 512-byte bitset (64 x u64), then reuse it for flood fill and uniform-section shortcuts.
+    let mut seen = [0u64; 64];
+    let mut opaque_count = 0usize;
     for y in 0..16 {
         for z in 0..16 {
             let row = pi(0, y, z);
+            let word_idx = (y as usize) << 2 | (z as usize) >> 2;
+            let bit_base = ((z as usize) & 3) << 4;
+            let mut word_bits = 0u64;
             for x in 0..16 {
-                let opaque = info[pad.blocks[row + x] as usize].solid;
-                seen[(y as usize) << 8 | (z as usize) << 4 | x] = opaque;
-                opaque_count += usize::from(opaque);
+                if info[pad.blocks[row + x] as usize].solid {
+                    word_bits |= 1u64 << (bit_base + x);
+                }
             }
+            seen[word_idx] |= word_bits;
+            opaque_count += word_bits.count_ones() as usize;
         }
     }
     if opaque_count == 0 {
@@ -205,68 +210,72 @@ fn visibility(pad: &Padded, info: &[Info]) -> u64 {
     }
     let mut result = 0u64;
     let mut stack = Vec::with_capacity(512);
-    for start in 0..4096usize {
-        if seen[start] {
-            continue;
-        }
-        let mut faces = 0u8;
-        seen[start] = true;
-        stack.push(start);
-        while let Some(c) = stack.pop() {
-            let (x, y, z) = ((c & 15) as i32, (c >> 8) as i32, ((c >> 4) & 15) as i32);
-            if y == 0 {
-                faces |= 1 << 0;
-            }
-            if y == 15 {
-                faces |= 1 << 1;
-            }
-            if z == 0 {
-                faces |= 1 << 2;
-            }
-            if z == 15 {
-                faces |= 1 << 3;
-            }
-            if x == 0 {
-                faces |= 1 << 4;
-            }
-            if x == 15 {
-                faces |= 1 << 5;
-            }
-            // A single connected region touching all six faces sets every
-            // pair (including the diagonal); unvisited cavities cannot add more.
-            if faces == 0b11_1111 {
-                return ALL_VISIBLE;
-            }
-            for (dx, dy, dz) in [
-                (1, 0, 0),
-                (-1, 0, 0),
-                (0, 1, 0),
-                (0, -1, 0),
-                (0, 0, 1),
-                (0, 0, -1),
-            ] {
-                let (nx, ny, nz) = (x + dx, y + dy, z + dz);
-                if !(0..16).contains(&nx) || !(0..16).contains(&ny) || !(0..16).contains(&nz) {
-                    continue;
+    for word_idx in 0..64usize {
+        while seen[word_idx] != u64::MAX {
+            let bit = (!seen[word_idx]).trailing_zeros() as usize;
+            let start = (word_idx << 6) | bit;
+            seen[word_idx] |= 1u64 << bit;
+            let mut faces = 0u8;
+            stack.push(start as u16);
+            while let Some(c) = stack.pop() {
+                let c = c as usize;
+                let (x, y, z) = ((c & 15) as i32, (c >> 8) as i32, ((c >> 4) & 15) as i32);
+                if y == 0 {
+                    faces |= 1 << 0;
                 }
-                let n = (ny << 8 | nz << 4 | nx) as usize;
-                if !seen[n] {
-                    seen[n] = true;
-                    stack.push(n);
+                if y == 15 {
+                    faces |= 1 << 1;
                 }
-            }
-        }
-        for a in 0..6 {
-            if faces & (1 << a) != 0 {
-                for b in 0..6 {
-                    if faces & (1 << b) != 0 {
-                        result |= 1 << (a * 6 + b);
+                if z == 0 {
+                    faces |= 1 << 2;
+                }
+                if z == 15 {
+                    faces |= 1 << 3;
+                }
+                if x == 0 {
+                    faces |= 1 << 4;
+                }
+                if x == 15 {
+                    faces |= 1 << 5;
+                }
+                // A single connected region touching all six faces sets every
+                // pair (including the diagonal); unvisited cavities cannot add more.
+                if faces == 0b11_1111 {
+                    return ALL_VISIBLE;
+                }
+                for (dx, dy, dz) in [
+                    (1, 0, 0),
+                    (-1, 0, 0),
+                    (0, 1, 0),
+                    (0, -1, 0),
+                    (0, 0, 1),
+                    (0, 0, -1),
+                ] {
+                    let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+                    if (nx | ny | nz) & !15 != 0 {
+                        continue;
+                    }
+                    let n = (ny << 8 | nz << 4 | nx) as usize;
+                    let nw = n >> 6;
+                    let nb = 1u64 << (n & 63);
+                    if seen[nw] & nb == 0 {
+                        seen[nw] |= nb;
+                        stack.push(n as u16);
                     }
                 }
             }
-        }
-        if result == ALL_VISIBLE {
-            return result;
+            for a in 0..6 {
+                if faces & (1 << a) != 0 {
+                    for b in 0..6 {
+                        if faces & (1 << b) != 0 {
+                            result |= 1 << (a * 6 + b);
+                        }
+                    }
+                }
+            }
+            if result == ALL_VISIBLE {
+                return result;
+            }
         }
     }
     result
@@ -629,16 +638,16 @@ fn offset(info: &Info, x: i32, z: i32) -> Option<[f64; 3]> {
 /// Border width: smooth lighting samples up to two blocks out along a face normal.
 const B: i32 = 2;
 const P: usize = 16 + 2 * B as usize;
-#[inline]
+#[inline(always)]
 fn pi(x: i32, y: i32, z: i32) -> usize {
     ((y + B) as usize * P + (z + B) as usize) * P + (x + B) as usize
 }
 thread_local! {
-    static PAD_SCRATCH: std::cell::RefCell<(Vec<u32>, Vec<u8>, Box<[u32; 4096]>)> =
+    static PAD_SCRATCH: std::cell::RefCell<(Vec<u32>, Vec<u8>, Option<Box<[u32; 4096]>>)> =
         std::cell::RefCell::new((
             vec![0u32; P * P * P],
             vec![0u8; P * P * P],
-            Box::new([0u32; 4096]),
+            Some(Box::new([0u32; 4096])),
         ));
 }
 
@@ -681,7 +690,7 @@ impl Padded {
                 vec![0u8; P * P * P]
             };
             l.resize(P * P * P, 0);
-            let o = std::mem::replace(&mut cell.2, Box::new([0u32; 4096]));
+            let o = cell.2.take().unwrap_or_else(|| Box::new([0u32; 4096]));
             (b, l, o)
         });
         let base_y = region[1][1].map_or(MIN_Y, Chunk::min_y) + sy * 16;
@@ -690,32 +699,51 @@ impl Padded {
         let center = region[1][1].map(|c| &c.sections[sy as usize]);
         if let Some(section) = center {
             section.unpack(&mut own);
+        } else {
+            own.fill(0);
         }
         for y in -B..16 + B {
             let wy = base_y + y;
+            let in_y = (0..16).contains(&y);
             for z in -B..16 + B {
-                for x in -B..16 + B {
-                    let chunk = region[((z + 16) >> 4) as usize][((x + 16) >> 4) as usize];
-                    let i = pi(x, y, z);
-                    if let Some(c) = chunk {
-                        blocks[i] =
-                            if (0..16).contains(&x) && (0..16).contains(&y) && (0..16).contains(&z)
-                            {
-                                own[(y << 8 | z << 4 | x) as usize]
-                            } else {
-                                c.get(x & 15, wy, z & 15)
-                            };
-                        light[i] = c.light(x & 15, wy, z & 15);
-                    } else {
-                        blocks[i] = 0;
-                        light[i] = 0xF0;
+                let in_z = (0..16).contains(&z);
+                if in_y && in_z && region[1][1].is_some() {
+                    let row_dst = pi(0, y, z);
+                    let row_src = ((y as usize) << 8) | ((z as usize) << 4);
+                    blocks[row_dst..row_dst + 16].copy_from_slice(&own[row_src..row_src + 16]);
+                    let c = region[1][1].unwrap();
+                    for x in 0..16 {
+                        light[row_dst + x as usize] = c.light(x, wy, z);
+                    }
+                    for x in [-2, -1, 16, 17] {
+                        let chunk = region[((z + 16) >> 4) as usize][((x + 16) >> 4) as usize];
+                        let i = pi(x, y, z);
+                        if let Some(c) = chunk {
+                            blocks[i] = c.get(x & 15, wy, z & 15);
+                            light[i] = c.light(x & 15, wy, z & 15);
+                        } else {
+                            blocks[i] = 0;
+                            light[i] = 0xF0;
+                        }
+                    }
+                } else {
+                    for x in -B..16 + B {
+                        let chunk = region[((z + 16) >> 4) as usize][((x + 16) >> 4) as usize];
+                        let i = pi(x, y, z);
+                        if let Some(c) = chunk {
+                            blocks[i] = c.get(x & 15, wy, z & 15);
+                            light[i] = c.light(x & 15, wy, z & 15);
+                        } else {
+                            blocks[i] = 0;
+                            light[i] = 0xF0;
+                        }
                     }
                 }
             }
         }
         let _ = PAD_SCRATCH.try_with(|scratch| {
             if let Ok(mut cell) = scratch.try_borrow_mut() {
-                cell.2 = own;
+                cell.2 = Some(own);
             }
         });
         Self { blocks, light }
@@ -767,8 +795,9 @@ enum Resolver {
 }
 /// Biome tints of one block layer: the zoomed biome of every block of the
 /// layer plus the blend radius around it, and the blended colours per column.
+/// `radius` is clamped to `0..=7`, so `dim <= 30` (`30 * 30 = 900`).
 struct Layer {
-    zoomed: Vec<u16>,
+    zoomed: [u16; 900],
     colors: [[u32; 256]; 4],
 }
 /// `ClientLevel.calculateBlockTint` behind a per-layer `BlockTintCache`: each
@@ -809,7 +838,7 @@ impl<'a> Tints<'a> {
         let dim = (16 + 2 * r) as usize;
         let layer = self.layers[y as usize].get_or_insert_with(|| {
             Box::new(Layer {
-                zoomed: vec![NO_BIOME; dim * dim],
+                zoomed: [NO_BIOME; 900],
                 colors: [[UNSET; 256]; 4],
             })
         });

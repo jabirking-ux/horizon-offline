@@ -276,9 +276,11 @@ impl Biomes {
     pub fn contains(&self, name: &str) -> bool {
         self.index.contains_key(name)
     }
+    #[inline(always)]
     pub fn get(&self, id: u16) -> &BiomeInfo {
         &self.list[usize::from(id).min(self.list.len() - 1)]
     }
+    #[inline]
     pub fn grass(&self, id: u16, x: f64, z: f64) -> u32 {
         let b = self.get(id);
         match b.modifier {
@@ -296,8 +298,9 @@ impl Biomes {
 }
 
 /// A 24-bit colour as sRGB components in 0..1.
+#[inline(always)]
 pub fn rgb(c: u32) -> [f32; 3] {
-    [16, 8, 0].map(|shift| (c >> shift & 255) as f32 / 255.0)
+    [16, 8, 0].map(|shift| (c >> shift & 255) as f32 * (1.0 / 255.0))
 }
 
 /// `GaussianSampler.GAUSSIAN_SAMPLE_KERNEL`.
@@ -314,23 +317,26 @@ pub fn gaussian_weights(
     let p = position.map(|c| c * 0.25 - 0.5);
     let integral = p.map(|c| c.floor() as i32);
     let relative: [f64; 3] = std::array::from_fn(|i| p[i] - f64::from(integral[i]));
-    let weight = |axis: usize, i: usize| {
-        let (start, end) = (GAUSSIAN_KERNEL[i + 1], GAUSSIAN_KERNEL[i]);
-        start + relative[axis] * (end - start)
+    let axis_weights = |axis: usize| -> [f64; 6] {
+        std::array::from_fn(|i| {
+            let (start, end) = (GAUSSIAN_KERNEL[i + 1], GAUSSIAN_KERNEL[i]);
+            start + relative[axis] * (end - start)
+        })
     };
-    let mut weights: Vec<(u16, f64)> = Vec::new();
-    for z in 0..6 {
-        let wz = weight(2, z);
-        for x in 0..6 {
-            let wx = weight(0, x);
-            for y in 0..6 {
-                let wy = weight(1, y);
+    let wx_arr = axis_weights(0);
+    let wy_arr = axis_weights(1);
+    let wz_arr = axis_weights(2);
+    let mut weights: Vec<(u16, f64)> = Vec::with_capacity(8);
+    for (z, &wz) in wz_arr.iter().enumerate() {
+        for (x, &wx) in wx_arr.iter().enumerate() {
+            let wxz = wx * wz;
+            for (y, &wy) in wy_arr.iter().enumerate() {
                 let biome = biome_at_quart(
                     integral[0] - 2 + x as i32,
                     integral[1] - 2 + y as i32,
                     integral[2] - 2 + z as i32,
                 );
-                let w = wx * wy * wz;
+                let w = wxz * wy;
                 match weights.iter_mut().find(|(b, _)| *b == biome) {
                     Some((_, total)) => *total += w,
                     None => weights.push((biome, w)),

@@ -13,9 +13,10 @@
 //! frame has (vanilla's partial update), so what it opens shows at once; what
 //! it closes goes at the next full search.
 use super::SectionKey;
+use crate::fast_hash::FxHashMap;
 use crate::mesher::ALL_VISIBLE;
 use glam::DVec3;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 
 /// Vanilla's `Direction` order: down, up, north, south, west, east.
@@ -44,7 +45,7 @@ struct Columns {
     /// The lowest block y of section 0 (`Level.getMinY`).
     min_y: i32,
     sections: i32,
-    map: HashMap<(i32, i32), Box<[u64]>>,
+    map: FxHashMap<(i32, i32), Box<[u64]>>,
 }
 
 impl Columns {
@@ -52,7 +53,7 @@ impl Columns {
         Self {
             min_y,
             sections,
-            map: HashMap::new(),
+            map: FxHashMap::default(),
         }
     }
     /// `SectionPos.of`: the section holding `pos`.
@@ -137,6 +138,7 @@ struct Graph {
 }
 
 impl Graph {
+    #[inline(always)]
     fn index(&self, key: SectionKey) -> Option<usize> {
         let (dx, dz, dy) = (key.0 - self.from.0, key.2 - self.from.2, key.1 - self.y0);
         let side = 2 * self.radius + 1;
@@ -145,6 +147,7 @@ impl Graph {
         }
         Some((((dz + self.radius) * side + dx + self.radius) * self.height + dy) as usize)
     }
+    #[inline(always)]
     fn key(&self, index: usize) -> SectionKey {
         let side = 2 * self.radius + 1;
         let i = index as i32;
@@ -155,6 +158,7 @@ impl Graph {
             self.from.2 + column / side - self.radius,
         )
     }
+    #[inline(always)]
     fn contains(&self, key: SectionKey) -> bool {
         self.index(key)
             .is_some_and(|i| self.directions[i] & REACHED != 0)
@@ -285,9 +289,14 @@ impl Graph {
                 0x3f
             } else {
                 let vis = vis(i, key);
-                (0..6)
-                    .filter(|face| entered & (1 << face) != 0)
-                    .fold(0, |exits, face| exits | (vis >> (face * 6)) as u8 & 0x3f)
+                let mut m = entered;
+                let mut exits = 0u8;
+                while m != 0 {
+                    let face = m.trailing_zeros();
+                    exits |= (vis >> (face * 6)) as u8;
+                    m &= m - 1;
+                }
+                exits & 0x3f
             };
             let distant = (key.0 - eye.0).abs() > DISTANT_SECTIONS
                 || (key.1 - eye.1).abs() > DISTANT_SECTIONS
@@ -428,6 +437,7 @@ impl Graph {
 
 /// `Mth.floor` for coordinates inside the world, without a libm call (the
 /// x86-64 baseline has no rounding instruction).
+#[inline(always)]
 fn floor(x: f64) -> i32 {
     let i = x as i32;
     i - i32::from(f64::from(i) > x)
@@ -561,6 +571,7 @@ impl Occlusion {
     /// Whether `key` is visible from the camera. Without a usable graph
     /// (before the first search lands, or with the camera somewhere the graph
     /// never reached) every section is.
+    #[inline(always)]
     pub fn contains(&self, key: SectionKey) -> bool {
         self.graph.as_ref().is_none_or(|g| g.contains(key))
     }
@@ -685,6 +696,7 @@ impl Occlusion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     /// The centre of a section, in a world whose section 0 starts at y 0.
     fn at(key: SectionKey) -> DVec3 {
