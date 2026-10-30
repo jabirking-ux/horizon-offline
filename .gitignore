@@ -34,3 +34,4 @@
 
 # Release-only compiled original exporter bundle.
 /exporters/
+*.exe

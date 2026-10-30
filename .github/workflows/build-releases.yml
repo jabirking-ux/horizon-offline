@@ -65,12 +65,25 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -Path launcher/target/${{ matrix.target }}/dist/${{ matrix.binary }} -DestinationPath ${{ matrix.asset }}
+          choco install nsis -y
+          $ver = "${{ github.event.inputs.tag_name || github.ref_name }}".TrimStart('v').Replace('-offline', '')
+          if (-not $ver) { $ver = "0.2.0" }
+          $srcExe = (Resolve-Path "launcher/target/${{ matrix.target }}/dist/${{ matrix.binary }}").Path
+          $icon = (Resolve-Path "packaging/icons/horizon.ico").Path
+          if (Get-Command makensis -ErrorAction SilentlyContinue) {
+            makensis /DVERSION=$ver "/DSOURCE_EXE=$srcExe" "/DICON_FILE=$icon" /DOUT_FILE=Horizon-Offline-Setup.exe packaging/windows/installer.nsi
+          } else {
+            & "C:\Program Files (x86)\NSIS\makensis.exe" /DVERSION=$ver "/DSOURCE_EXE=$srcExe" "/DICON_FILE=$icon" /DOUT_FILE=Horizon-Offline-Setup.exe packaging/windows/installer.nsi
+          }
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}
+            Horizon-Offline-Setup.exe
+          if-no-files-found: ignore
 
   release:
     name: Create GitHub Release
