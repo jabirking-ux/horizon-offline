@@ -56,15 +56,15 @@ jobs:
       - name: Package Artifact (Linux / macOS)
         if: runner.os != 'Windows'
         run: |
-          cd target/${{ matrix.target }}/dist
-          tar -czf ../../../${{ matrix.asset }} ${{ matrix.binary }}
-          cd ../../..
+          cd launcher/target/${{ matrix.target }}/dist
+          tar -czf ../../../../${{ matrix.asset }} ${{ matrix.binary }}
+          cd ../../../..
 
       - name: Package Artifact (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path target/${{ matrix.target }}/dist/${{ matrix.binary }} -DestinationPath ${{ matrix.asset }}
+          Compress-Archive -Path launcher/target/${{ matrix.target }}/dist/${{ matrix.binary }} -DestinationPath ${{ matrix.asset }}
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4

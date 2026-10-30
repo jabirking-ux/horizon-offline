@@ -66,3 +66,10 @@ winresource = "0.1"
 
 [profile.release]
 strip = true
+
+# Size and cold-start tuned build used for the released binaries.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = true
