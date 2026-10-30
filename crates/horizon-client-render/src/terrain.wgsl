@@ -94,7 +94,7 @@ fn dynamic_block_light(pos: vec3<f32>) -> f32 {
 fn sample_lightmap(sky: f32, block: f32) -> vec4<f32> {
     let uv = vec2(block, sky) * 16.0;
     return textureSampleLevel(lightmap, lightmap_sampler,
-        clamp(uv / 256.0 + 0.5 / 16.0, vec2(0.5 / 16.0), vec2(15.5 / 16.0)), 0.0);
+        clamp(uv * 0.00390625 + 0.03125, vec2(0.03125), vec2(0.96875)), 0.0);
 }
 // mesher.rs's TerrainVertex holds the UV in fixed point; the instance's
 // origin.w is the step: 1/32768 per unit for sections (a power of two on an

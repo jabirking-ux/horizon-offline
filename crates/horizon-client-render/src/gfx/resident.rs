@@ -221,6 +221,7 @@ impl<T> Resident<T> {
         out: &mut Vec<Visible>,
     ) {
         let from = camera_column(camera);
+        let min_y_base = f64::from(self.min_y) - camera.y;
         for column in &self.columns {
             let near = in_view_distance(from, radius, column.x, column.z);
             if !near && !beyond(column.x, column.z) {
@@ -228,8 +229,8 @@ impl<T> Resident<T> {
             }
             let col_ox = f64::from(column.x * 16) - camera.x;
             let col_oz = f64::from(column.z * 16) - camera.z;
-            let low_oy = f64::from(self.min_y + column.low * 16) - camera.y;
-            let high_oy = f64::from(self.min_y + column.high * 16) - camera.y;
+            let low_oy = min_y_base + f64::from(column.low * 16);
+            let high_oy = min_y_base + f64::from(column.high * 16);
             let min = Vec3::new(col_ox as f32, low_oy as f32, col_oz as f32);
             let max = Vec3::new(col_ox as f32 + 16.0, high_oy as f32 + 16.0, col_oz as f32 + 16.0);
             let inside = frustum.contains(min, max);
@@ -241,12 +242,9 @@ impl<T> Resident<T> {
                 if near && !reachable(key) {
                     continue;
                 }
-                let sec_origin = DVec3::new(
-                    col_ox,
-                    f64::from(self.min_y + y * 16) - camera.y,
-                    col_oz,
-                );
-                let sec_min = sec_origin.as_vec3();
+                let sec_oy = min_y_base + f64::from(y * 16);
+                let sec_origin = DVec3::new(col_ox, sec_oy, col_oz);
+                let sec_min = Vec3::new(col_ox as f32, sec_oy as f32, col_oz as f32);
                 if !inside && !frustum.intersects(sec_min, sec_min + Vec3::splat(16.0)) {
                     continue;
                 }

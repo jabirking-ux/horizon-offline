@@ -58,7 +58,7 @@ jobs:
 
       - name: Build Game (Windows)
         if: runner.os == 'Windows'
-        run: cargo build --release -p horizon-client --bin horizon-client -p horizon-ctl --bin horizon-ctl -p horizon-prepare --bin horizon-prepare -p horizon-server --bin horizon-server
+        run: cargo build --release -p horizon-client --bin horizon-client --bin horizon-ctl -p horizon-prepare --bin horizon-prepare -p horizon-server --bin horizon-server
 
       - name: Package Game (Windows)
         if: runner.os == 'Windows'
@@ -79,7 +79,7 @@ jobs:
 
       - name: Build Game (Linux)
         if: runner.os == 'Linux'
-        run: cargo build --release -p horizon-client --bin horizon-client -p horizon-ctl --bin horizon-ctl -p horizon-prepare --bin horizon-prepare -p horizon-server --bin horizon-server
+        run: cargo build --release -p horizon-client --bin horizon-client --bin horizon-ctl -p horizon-prepare --bin horizon-prepare -p horizon-server --bin horizon-server
 
       - name: Package Game (Linux)
         if: runner.os == 'Linux'

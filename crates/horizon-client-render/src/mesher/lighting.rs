@@ -9,6 +9,7 @@ use horizon_assets::model::Direction as D;
 pub(super) const FULL_BRIGHT: u32 = 0x00F0_00F0;
 
 /// `CardinalLighting.DEFAULT`/`NETHER` by face.
+#[inline(always)]
 pub(super) fn cardinal(nether: bool, face: D) -> f32 {
     match face {
         D::Down if nether => 0.9,
@@ -19,6 +20,7 @@ pub(super) fn cardinal(nether: bool, face: D) -> f32 {
         D::West | D::East => 0.6,
     }
 }
+#[inline(always)]
 fn normal(face: D) -> [i32; 3] {
     match face {
         D::Down => [0, -1, 0],
@@ -29,19 +31,23 @@ fn normal(face: D) -> [i32; 3] {
         D::East => [1, 0, 0],
     }
 }
+#[inline(always)]
 pub(super) fn step(p: [i32; 3], face: D) -> [i32; 3] {
     let n = normal(face);
     [p[0] + n[0], p[1] + n[1], p[2] + n[2]]
 }
+#[inline(always)]
 fn state<'a>(pad: &Padded, info: &'a [Info], p: [i32; 3]) -> &'a Info {
     &info[pad.blocks[pi(p[0], p[1], p[2])] as usize]
 }
 /// `LightCoordsUtil.getLightCoords`: light at `p` as seen through `state`
 /// (block level << 4 | sky level << 20).
+#[inline(always)]
 pub(super) fn coords(pad: &Padded, state: &Info, p: [i32; 3]) -> u32 {
     packed_coords(state, pad.light[pi(p[0], p[1], p[2])])
 }
 /// `coords` of a stored light byte (sky level << 4 | block level).
+#[inline(always)]
 pub(super) fn packed_coords(state: &Info, packed: u8) -> u32 {
     if state.emissive {
         return FULL_BRIGHT;
@@ -50,10 +56,12 @@ pub(super) fn packed_coords(state: &Info, packed: u8) -> u32 {
     block << 4 | u32::from(packed >> 4) << 20
 }
 /// `LightCoordsUtil.max`.
+#[inline(always)]
 pub(super) fn max_coords(a: u32, b: u32) -> u32 {
     (a >> 4 & 15).max(b >> 4 & 15) << 4 | (a >> 20 & 15).max(b >> 20 & 15) << 20
 }
 /// `LightCoordsUtil.lightCoordsWithEmission` (a quad's element light emission).
+#[inline(always)]
 pub(super) fn with_emission(coords: u32, emission: u8) -> u32 {
     if emission == 0 {
         return coords;
@@ -63,6 +71,7 @@ pub(super) fn with_emission(coords: u32, emission: u8) -> u32 {
 }
 /// `LightCoordsUtil.smoothBlend`: zero samples take the centre; samples without
 /// sky light borrow the centre's sky.
+#[inline(always)]
 pub(super) fn smooth_blend(mut a: u32, mut b: u32, mut c: u32, center: u32) -> u32 {
     if center >> 20 & 15 > 2 || center >> 4 & 15 > 2 {
         for n in [&mut a, &mut b, &mut c] {
@@ -76,6 +85,7 @@ pub(super) fn smooth_blend(mut a: u32, mut b: u32, mut c: u32, center: u32) -> u
     (a + b + c + center) >> 2 & 0x00FF_00FF
 }
 /// `LightCoordsUtil.smoothWeightedBlend` (Java float sums and int narrowing).
+#[inline(always)]
 fn weighted_blend(c: [u32; 4], w: [f32; 4]) -> u32 {
     let channel = |shift: u32| {
         let v = |i: usize| (c[i] >> shift & 0xFF) as f32 * w[i];
@@ -84,10 +94,12 @@ fn weighted_blend(c: [u32; 4], w: [f32; 4]) -> u32 {
     channel(0) | channel(16) << 16
 }
 /// `ARGB.gray` channel: `Mth.floor(brightness * 255)`.
+#[inline(always)]
 pub(super) fn gray(brightness: f32) -> i32 {
     (brightness * 255.0).floor() as i32
 }
 /// One channel of `ARGB.scaleRGB(color, float)`.
+#[inline(always)]
 pub(super) fn scale(channel: i32, by: f32) -> i32 {
     ((channel as f32 * by) as i32).clamp(0, 255)
 }
@@ -232,6 +244,7 @@ struct Shape {
     partial: bool,
     cubic: bool,
 }
+#[inline(always)]
 fn shape(positions: &[[f32; 3]; 4], face: D, full: bool) -> Shape {
     let (mut min, mut max) = ([32f32; 3], [-32f32; 3]);
     for p in positions {
@@ -270,6 +283,7 @@ fn shape(positions: &[[f32; 3]; 4], face: D, full: bool) -> Shape {
 }
 /// `prepareQuadFlat` for a quad without a cull face: light from the
 /// neighbour when the quad is flush with the face, else from the block itself.
+#[inline(always)]
 pub(super) fn flat(
     pad: &Padded,
     own: &Info,
@@ -287,6 +301,7 @@ pub(super) fn flat(
 /// neighbour on its cull face, else `prepareQuadFlat`'s choice (the neighbour
 /// when the quad is cubic, else the block itself). `full` is the block's
 /// `isCollisionShapeFullBlock`.
+#[inline(always)]
 pub(super) fn flat_position(
     pos: [i32; 3],
     positions: &[[f32; 3]; 4],
@@ -302,6 +317,7 @@ pub(super) fn flat_position(
 }
 /// `prepareQuadAmbientOcclusion`: per-vertex AO brightness (before `ARGB.gray`)
 /// and smooth light coords, by vertex index.
+#[inline(always)]
 pub(super) fn ambient_occlusion(
     pad: &Padded,
     info: &[Info],

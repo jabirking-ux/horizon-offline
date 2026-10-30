@@ -5850,13 +5850,11 @@ pub struct Frustum {
 }
 impl Frustum {
     /// Whether the camera-relative box `min..max` is at least partly inside.
+    #[inline(always)]
     pub fn intersects(&self, min: Vec3, max: Vec3) -> bool {
         !self.planes.iter().any(|p| {
-            let v = Vec3::new(
-                if p.x >= 0.0 { max.x } else { min.x },
-                if p.y >= 0.0 { max.y } else { min.y },
-                if p.z >= 0.0 { max.z } else { min.z },
-            );
+            let mask = p.truncate().cmpge(Vec3::ZERO);
+            let v = Vec3::select(mask, max, min);
             p.truncate().dot(v) + p.w < 0.0
         })
     }
@@ -5864,13 +5862,11 @@ impl Frustum {
     /// `intersects` accepts every box within it: each plane's distance only
     /// grows from this box's nearest corner to the inner box's farthest, and
     /// rounding keeps that order.
+    #[inline(always)]
     pub fn contains(&self, min: Vec3, max: Vec3) -> bool {
         self.planes.iter().all(|p| {
-            let v = Vec3::new(
-                if p.x >= 0.0 { min.x } else { max.x },
-                if p.y >= 0.0 { min.y } else { max.y },
-                if p.z >= 0.0 { min.z } else { max.z },
-            );
+            let mask = p.truncate().cmpge(Vec3::ZERO);
+            let v = Vec3::select(mask, min, max);
             p.truncate().dot(v) + p.w >= 0.0
         })
     }

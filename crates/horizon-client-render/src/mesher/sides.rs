@@ -78,23 +78,27 @@ impl Sides {
     pub fn visible(&self, eye: [f32; 3], mut draw: impl FnMut(u32, u32)) {
         let mut start = 0;
         let mut run: Option<u32> = None;
-        for (i, bucket) in BUCKETS.iter().enumerate() {
+        let seen = [
+            eye[0] > self.planes[0] - MARGIN,
+            eye[2] > self.planes[1] - MARGIN,
+            true,
+            eye[1] > self.planes[3] - MARGIN,
+            eye[2] < self.planes[4] + MARGIN,
+            eye[0] < self.planes[5] + MARGIN,
+            eye[1] < self.planes[6] + MARGIN,
+        ];
+        for i in 0..7 {
             let end = self.ends[i];
             if end == start {
                 continue;
             }
-            let seen = match *bucket {
-                Bucket::Side(axis, true) => eye[axis] > self.planes[i] - MARGIN,
-                Bucket::Side(axis, false) => eye[axis] < self.planes[i] + MARGIN,
-                Bucket::Other => true,
-            };
-            match (seen, run) {
-                (true, None) => run = Some(start),
-                (false, Some(first)) => {
-                    draw(first, start - first);
-                    run = None;
+            if seen[i] {
+                if run.is_none() {
+                    run = Some(start);
                 }
-                _ => {}
+            } else if let Some(first) = run {
+                draw(first, start - first);
+                run = None;
             }
             start = end;
         }

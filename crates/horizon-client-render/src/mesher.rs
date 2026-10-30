@@ -74,6 +74,7 @@ pub const UV_STEPS: f32 = 32768.0;
 /// which span `[0, 2048)`: merged faces repeat their sprite once per block.
 pub const TILED_UV_STEPS: f32 = 32.0;
 impl TerrainVertex {
+    #[inline(always)]
     pub fn new(pos: [f32; 3], uv: [f32; 2], layer: u16, color: u32, light: u16) -> Self {
         Self {
             pos,
@@ -85,6 +86,7 @@ impl TerrainVertex {
     }
     /// A vertex of a merged distant-terrain face, its UV in blocks from the
     /// face's corner. Drawn with an instance UV scale of `1 / TILED_UV_STEPS`.
+    #[inline(always)]
     pub fn tiled(pos: [f32; 3], uv: [f32; 2], layer: u16, color: u32, light: u16) -> Self {
         Self {
             pos,
@@ -95,6 +97,7 @@ impl TerrainVertex {
         }
     }
     /// The UV the GPU samples.
+    #[inline(always)]
     pub fn uv(&self) -> [f32; 2] {
         self.uv.map(|v| f32::from(v) / UV_STEPS)
     }
@@ -201,7 +204,7 @@ fn visibility(pad: &Padded, info: &[Info]) -> u64 {
         return 0;
     }
     let mut result = 0u64;
-    let mut stack = Vec::new();
+    let mut stack = Vec::with_capacity(512);
     for start in 0..4096usize {
         if seen[start] {
             continue;

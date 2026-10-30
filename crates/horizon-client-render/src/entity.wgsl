@@ -81,9 +81,13 @@ fn overlay_texel(overlay: u32) -> vec4<f32> {
 // (16 per level), a vertex at camera-relative `pos` gets from the frame's light sources, one
 // level less per block. time.z of them are set: none when the extra is off, so no loop runs.
 fn dynamic_block_light(pos: vec3<f32>) -> f32 {
-    let count = min(u32(globals.time.z), 16u);
+    let count = u32(globals.time.z);
+    if count == 0u {
+        return 0.0;
+    }
+    let n = min(count, 16u);
     var level = 0.0;
-    for (var i = 0u; i < count; i++) {
+    for (var i = 0u; i < n; i++) {
         let l = globals.dynamic_lights[i];
         level = max(level, l.w - distance(pos, l.xyz));
     }
@@ -97,7 +101,7 @@ fn entity_vertex(position: vec3<f32>, uv: vec2<f32>,
     out.uv = uv;
     let l = vec2(max(f32(light.y), dynamic_block_light(position)), f32(light.x));
     let lm = textureSampleLevel(lightmap, lightmap_sampler,
-        clamp(l / 256.0 + 0.5 / 16.0, vec2(0.5 / 16.0), vec2(15.5 / 16.0)), 0.0);
+        clamp(l * 0.00390625 + 0.03125, vec2(0.03125), vec2(0.96875)), 0.0);
     // Celestial bodies, clouds, beacon beams, End portals and breaking cracks are unlit.
     let unlit = overlay == 2u || overlay == 4u || overlay == 6u || overlay == 9u || overlay == 10u
         || overlay == 11u || overlay == 12u;
