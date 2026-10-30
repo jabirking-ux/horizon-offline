@@ -260,7 +260,9 @@ fn replace_word(text: &str, word: &str, label: &str) -> String {
     while let Some(found) = hay[from..].find(needle) {
         let start = from + found;
         let end = start + needle.len();
-        let alone = (start == 0 || !word_byte(bytes[start - 1])) && ends_token(bytes, end);
+        let alone = (start == 0 || !word_byte(bytes[start - 1]))
+            && ends_token(bytes, end)
+            && !(start > 0 && bytes[start - 1] == b'<' && bytes.get(end) == Some(&b'>'));
         if alone {
             out.push_str(&text[copied..start]);
             out.push_str(label);

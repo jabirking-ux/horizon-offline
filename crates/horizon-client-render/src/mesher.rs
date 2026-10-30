@@ -537,19 +537,60 @@ const P: usize = 16 + 2 * B as usize;
 fn pi(x: i32, y: i32, z: i32) -> usize {
     ((y + B) as usize * P + (z + B) as usize) * P + (x + B) as usize
 }
-/// Blocks and light of one section plus a `B`-block border.
-struct Padded {
-    blocks: Vec<u32>,
-    light: Vec<u8>,
+thread_local! {
+    static PAD_SCRATCH: std::cell::RefCell<(Vec<u32>, Vec<u8>, Box<[u32; 4096]>)> =
+        std::cell::RefCell::new((
+            vec![0u32; P * P * P],
+            vec![0u8; P * P * P],
+            Box::new([0u32; 4096]),
+        ));
 }
+
+/// Blocks and light of one section plus a B-block border.
+pub struct Padded {
+    pub blocks: Vec<u32>,
+    pub light: Vec<u8>,
+}
+
+impl Drop for Padded {
+    fn drop(&mut self) {
+        let blocks = std::mem::take(&mut self.blocks);
+        let light = std::mem::take(&mut self.light);
+        let _ = PAD_SCRATCH.try_with(|scratch| {
+            if let Ok(mut cell) = scratch.try_borrow_mut() {
+                if cell.0.capacity() < blocks.capacity() {
+                    cell.0 = blocks;
+                }
+                if cell.1.capacity() < light.capacity() {
+                    cell.1 = light;
+                }
+            }
+        });
+    }
+}
+
 impl Padded {
     fn new(region: &[[Option<&Chunk>; 3]; 3], sy: i32) -> Self {
-        let mut blocks = vec![0u32; P * P * P];
-        let mut light = vec![0u8; P * P * P];
+        let (mut blocks, mut light, mut own) = PAD_SCRATCH.with(|scratch| {
+            let mut cell = scratch.borrow_mut();
+            let mut b = if cell.0.capacity() >= P * P * P {
+                std::mem::take(&mut cell.0)
+            } else {
+                vec![0u32; P * P * P]
+            };
+            b.resize(P * P * P, 0);
+            let mut l = if cell.1.capacity() >= P * P * P {
+                std::mem::take(&mut cell.1)
+            } else {
+                vec![0u8; P * P * P]
+            };
+            l.resize(P * P * P, 0);
+            let o = std::mem::replace(&mut cell.2, Box::new([0u32; 4096]));
+            (b, l, o)
+        });
         let base_y = MIN_Y + sy * 16;
         // The section itself is unpacked in one pass; the border cells of the
         // neighbouring sections are read one by one.
-        let mut own = Box::new([0u32; 4096]);
         let center = region[1][1].map(|c| &c.sections[sy as usize]);
         if let Some(section) = center {
             section.unpack(&mut own);
@@ -570,11 +611,17 @@ impl Padded {
                             };
                         light[i] = c.light(x & 15, wy, z & 15);
                     } else {
+                        blocks[i] = 0;
                         light[i] = 0xF0;
                     }
                 }
             }
         }
+        let _ = PAD_SCRATCH.try_with(|scratch| {
+            if let Ok(mut cell) = scratch.try_borrow_mut() {
+                cell.2 = own;
+            }
+        });
         Self { blocks, light }
     }
 }
@@ -745,7 +792,8 @@ impl Mesher<'_> {
         for y in 0..16 {
             for z in 0..16 {
                 for x in 0..16 {
-                    let id = pad.blocks[pi(x, y, z)];
+                    let idx = pi(x, y, z);
+                    let id = pad.blocks[idx];
                     if id == 0 {
                         continue;
                     }
@@ -754,13 +802,17 @@ impl Mesher<'_> {
                         out.block_entities
                             .push(([center.x * 16 + x, base_y + y, center.z * 16 + z], id));
                     }
-                    if state.solid
-                        && Direction::ALL.iter().all(|d| {
-                            let [dx, dy, dz] = d.normal();
-                            info[pad.blocks[pi(x + dx, y + dy, z + dz)] as usize].solid
-                        })
-                    {
-                        continue;
+                    if state.solid {
+                        let b = &pad.blocks;
+                        if info[b[idx + 1] as usize].solid
+                            && info[b[idx - 1] as usize].solid
+                            && info[b[idx + P] as usize].solid
+                            && info[b[idx - P] as usize].solid
+                            && info[b[idx + P * P] as usize].solid
+                            && info[b[idx - P * P] as usize].solid
+                        {
+                            continue;
+                        }
                     }
                     if state.fluid.kind() != FluidKind::Empty {
                         let water = tints.get(Resolver::Water, x, y, z);
@@ -792,19 +844,26 @@ impl Mesher<'_> {
                         None => [x as f32, y as f32, z as f32],
                     };
                     let mut visible = [false; 6];
-                    for d in Direction::ALL {
-                        let [dx, dy, dz] = d.normal();
-                        let neighbor = pad.blocks[pi(x + dx, y + dy, z + dz)];
+                    const NEIGHBORS: [isize; 6] = [
+                        -(P as isize * P as isize),
+                        P as isize * P as isize,
+                        -(P as isize),
+                        P as isize,
+                        -1,
+                        1,
+                    ];
+                    for (d, &offset) in Direction::ALL.iter().zip(&NEIGHBORS) {
+                        let neighbor = pad.blocks[(idx as isize + offset) as usize];
                         let other = &info[neighbor as usize];
                         // LeavesBlock.skipRendering with opaque leaves.
                         let opaque_leaves = !self.cutout_leaves && state.leaves && other.leaves;
-                        visible[d as usize] = !opaque_leaves
+                        visible[*d as usize] = !opaque_leaves
                             && self
                                 .visibility
                                 .should_render_face(
                                     BlockStateId(id),
                                     BlockStateId(neighbor),
-                                    d,
+                                    *d,
                                     true,
                                 )
                                 .unwrap_or(true);

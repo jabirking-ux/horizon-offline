@@ -144,6 +144,7 @@ pub struct Visible {
 }
 
 /// The camera-relative origin of the section at `key`.
+#[cfg(test)]
 fn origin(key: SectionKey, camera: DVec3) -> DVec3 {
     DVec3::new(
         f64::from(key.0 * 16),
@@ -174,6 +175,7 @@ fn in_view(key: SectionKey, camera: DVec3, radius: i32, frustum: &Frustum) -> Op
 
 /// `in_view` without the distance test; `inside`: the section's column is
 /// entirely inside the frustum, so the section is too.
+#[cfg(test)]
 fn in_frustum(
     key: SectionKey,
     camera: DVec3,
@@ -216,9 +218,12 @@ impl<T> Resident<T> {
             if !near && !beyond(column.x, column.z) {
                 continue;
             }
-            let min = origin((column.x, column.low, column.z), camera).as_vec3();
-            let top = origin((column.x, column.high, column.z), camera).as_vec3();
-            let max = top + Vec3::splat(16.0);
+            let col_ox = f64::from(column.x * 16) - camera.x;
+            let col_oz = f64::from(column.z * 16) - camera.z;
+            let low_oy = f64::from(crate::chunk::MIN_Y + column.low * 16) - camera.y;
+            let high_oy = f64::from(crate::chunk::MIN_Y + column.high * 16) - camera.y;
+            let min = Vec3::new(col_ox as f32, low_oy as f32, col_oz as f32);
+            let max = Vec3::new(col_ox as f32 + 16.0, high_oy as f32 + 16.0, col_oz as f32 + 16.0);
             let inside = frustum.contains(min, max);
             if !inside && !frustum.intersects(min, max) {
                 continue;
@@ -228,14 +233,22 @@ impl<T> Resident<T> {
                 if near && !reachable(key) {
                     continue;
                 }
-                if let Some((d, o)) = in_frustum(key, camera, frustum, inside) {
-                    out.push(Visible {
-                        distance: d.to_bits(),
-                        key,
-                        slot,
-                        origin: o.to_array(),
-                    });
+                let sec_origin = DVec3::new(
+                    col_ox,
+                    f64::from(crate::chunk::MIN_Y + y * 16) - camera.y,
+                    col_oz,
+                );
+                let sec_min = sec_origin.as_vec3();
+                if !inside && !frustum.intersects(sec_min, sec_min + Vec3::splat(16.0)) {
+                    continue;
                 }
+                let d = (sec_origin + DVec3::splat(8.0)).length_squared();
+                out.push(Visible {
+                    distance: d.to_bits(),
+                    key,
+                    slot,
+                    origin: sec_min.to_array(),
+                });
             }
         }
         out.sort_unstable_by_key(|v| (v.distance, v.key));

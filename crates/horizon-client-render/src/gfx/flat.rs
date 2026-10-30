@@ -126,7 +126,9 @@ pub fn wanted(adapter: &wgpu::Adapter, device: &wgpu::Device) -> bool {
         Ok("1") => return supported(adapter, device),
         _ => {}
     }
-    adapter.get_info().backend == wgpu::Backend::Metal && supported(adapter, device)
+    let flags = adapter.get_downlevel_capabilities().flags;
+    let indirect_unavailable = !flags.contains(wgpu::DownlevelFlags::INDIRECT_EXECUTION);
+    (adapter.get_info().backend == wgpu::Backend::Metal || indirect_unavailable) && supported(adapter, device)
 }
 
 fn supported(adapter: &wgpu::Adapter, device: &wgpu::Device) -> bool {
