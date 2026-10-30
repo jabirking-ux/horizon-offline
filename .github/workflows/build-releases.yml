@@ -48,7 +48,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libvulkan-dev libwayland-dev libx11-dev libxkbcommon-dev libfontconfig1-dev
+          sudo apt-get install -y libasound2-dev libvulkan-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libfontconfig1-dev
 
       - name: Build Launcher
         run: cargo build --profile dist --manifest-path launcher/Cargo.toml --target ${{ matrix.target }}
