@@ -2579,7 +2579,7 @@ impl Launcher {
             || {
                 div()
                     .child(if owner {
-                        tr("None needed: Horizon downloads Minecraft from Mojang for your account.")
+                        tr("None needed: Horizon downloads Minecraft directly from Mojang.")
                     } else {
                         tr("Not found. Choose the folder where your launcher keeps Minecraft.")
                     })
@@ -2606,7 +2606,7 @@ impl Launcher {
                 Some(
                     div()
                         .child(trf(
-                            "Minecraft {version} (Java Edition). Play downloads it from Mojang for your account the first time, with the Java it needs.",
+                            "Minecraft {version} (Java Edition). Play downloads it directly from Mojang the first time, with the Java it needs.",
                             &[("version", &java.minecraft)],
                         ))
                         .into_any_element(),

@@ -297,6 +297,7 @@ pub(crate) fn parse_releases(
     out
 }
 
+#[allow(dead_code)]
 fn is_launcher_tag(tag: &str) -> bool {
     launcher_version(tag).is_some()
 }
@@ -331,12 +332,14 @@ pub(crate) fn game_releases(list: &serde_json::Value) -> Vec<Release> {
 /// a day, so the newest launcher release can be older than all of those: then the newest
 /// `launcher@` and `launcher-v` tags are looked up one by one (a draft's tag is skipped: it has no
 /// public release).
+#[allow(dead_code)]
 fn launcher_releases_in(list: &serde_json::Value) -> Vec<Release> {
     launcher_releases_in_with(list, |url| {
         get(&url)?.into_json().map_err(|e| e.to_string())
     })
 }
 
+#[allow(dead_code)]
 fn launcher_releases_in_with(
     list: &serde_json::Value,
     json: impl Fn(String) -> Result<serde_json::Value, String>,
@@ -371,6 +374,7 @@ fn launcher_releases_in_with(
 }
 
 /// The launcher tags in GitHub's matching-refs answer, newest first.
+#[allow(dead_code)]
 fn newest_launcher_tags(refs: &serde_json::Value) -> Vec<String> {
     let mut tags: Vec<String> = refs
         .as_array()
@@ -413,7 +417,7 @@ impl Default for Links {
         Self {
             discord: "https://discord.gg/HcTeMZxe5E".into(),
             sponsor: "https://github.com/sponsors/ludovic111".into(),
-            website: "https://playhorizon.dev".into(),
+            website: "https://jabirking-ux.github.io/horizon-offline-site".into(),
         }
     }
 }
@@ -2322,7 +2326,7 @@ fn launcher_update_from(releases: &[Release], own: &str) -> Option<Release> {
 pub fn releases_and_updates(
     on_releases: impl FnOnce(Result<Vec<Release>, String>),
 ) -> Result<Updates, String> {
-    releases_and_updates_with(release_list, installed, launcher_releases_in, on_releases)
+    releases_and_updates_with(release_list, installed, |_| Vec::new(), on_releases)
 }
 
 fn releases_and_updates_with(
@@ -2407,7 +2411,7 @@ pub fn exe_path() -> &'static Path {
 
 /// Development builds and `HORIZON_LAUNCHER_NO_SELF_UPDATE` never replace themselves.
 pub fn self_update_allowed() -> bool {
-    !cfg!(debug_assertions) && std::env::var_os("HORIZON_LAUNCHER_NO_SELF_UPDATE").is_none()
+    false
 }
 
 /// The version in `horizon-launcher --version`'s output (`horizon-launcher 0.1.5`).
@@ -3855,10 +3859,10 @@ mod tests {
         let defaults = Links::default();
         assert_eq!(defaults.discord, "https://discord.gg/HcTeMZxe5E");
         assert_eq!(defaults.sponsor, "https://github.com/sponsors/ludovic111");
-        assert_eq!(defaults.website, "https://playhorizon.dev");
+        assert_eq!(defaults.website, "https://jabirking-ux.github.io/horizon-offline-site");
         // The file on main says the same thing as the defaults.
         let file = Links::parse(
-            r#"{"discord": "https://discord.gg/HcTeMZxe5E", "sponsor": "https://github.com/sponsors/ludovic111", "website": "https://playhorizon.dev"}"#,
+            r#"{"discord": "https://discord.gg/HcTeMZxe5E", "sponsor": "https://github.com/sponsors/ludovic111", "website": "https://jabirking-ux.github.io/horizon-offline-site"}"#,
         );
         assert_eq!(file, defaults);
         // Unreadable or missing, offline included: the defaults.
