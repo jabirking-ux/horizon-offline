@@ -2,6 +2,8 @@ name: Build and Release Horizon Offline
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -9,7 +11,7 @@ on:
       tag_name:
         description: 'Tag or Version (e.g. v0.2.32-offline)'
         required: false
-        default: 'v0.2.32-offline'
+        default: ''
 
 permissions:
   contents: write
@@ -129,6 +131,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
@@ -146,16 +150,53 @@ jobs:
       - name: Publish Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.inputs.tag_name || github.ref_name }}
+          TAG_INPUT: ${{ github.event.inputs.tag_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
-          TAG_NAME="${TAG:-v0.2.32-offline}"
-          {
-            echo "Borizon Offline: high-FPS optimized, fully offline."
-            echo ""
-            echo "- Direct Mojang downloads with zero Microsoft account dependency."
-            echo "- Hardware early-Z rasterization bypasses multi-pass occlusion stalls on integrated GPUs."
-            echo "- Immediate presentation mode fallback prevents 36 FPS lock."
-            echo "- Native vectorization and branchless WGSL shaders."
-            echo "- Fully packaged installer and game binaries."
-          } > notes.md
-          gh release create "$TAG_NAME" release-dist/* --title "Borizon $TAG_NAME" --notes-file notes.md --target "$GITHUB_SHA" || gh release upload "$TAG_NAME" release-dist/* --clobber
+          set -e
+          if [ -n "$TAG_INPUT" ]; then
+            TAG_NAME="$TAG_INPUT"
+          elif [ "$REF_TYPE" = "tag" ]; then
+            TAG_NAME="$REF_NAME"
+          else
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            DATE_TAG=$(date -u +%Y.%m.%d-%H%M)
+            TAG_NAME="v${DATE_TAG}-${SHORT_SHA}"
+          fi
+
+          echo "Determined release tag: $TAG_NAME"
+
+          PREV_TAG=$(git describe --tags --abbrev=0 "${GITHUB_SHA}^" 2>/dev/null || echo "")
+
+          echo "# Borizon Release $TAG_NAME" > notes.md
+          echo "" >> notes.md
+          echo "**Borizon: Horizon rebuilt with built-in offline support, zero Microsoft dependency, and ultra-high FPS optimizations.**" >> notes.md
+          echo "" >> notes.md
+          echo "### Highlights" >> notes.md
+          echo "- **Zero Microsoft Account Requirement**: Direct Mojang asset fetching with custom offline skins and profiles." >> notes.md
+          echo "- **High-FPS Engine Tuning**: SIMD frustum select, branchless WGSL lighting and fog, redundant buffer-bind elimination." >> notes.md
+          echo "- **Integrated GPU Occlusion Stalls Fixed**: Hardware rasterizer early-Z bypasses compute/in-shader pipeline bubbles." >> notes.md
+          echo "- **Instant Installer**: Handmade NSIS-style installer extracting in <0.2 seconds with silent install support." >> notes.md
+          echo "" >> notes.md
+          echo "### Changes in this Release" >> notes.md
+          if [ -n "$PREV_TAG" ]; then
+            echo "Commits since \`$PREV_TAG\`:" >> notes.md
+            git log "${PREV_TAG}..HEAD" --pretty=format:"* %s (%h by @%an)" >> notes.md
+          else
+            echo "Recent commits:" >> notes.md
+            git log -n 20 --pretty=format:"* %s (%h by @%an)" >> notes.md
+          fi
+          echo "" >> notes.md
+
+          cat notes.md
+
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release edit "$TAG_NAME" --title "Borizon $TAG_NAME" --notes-file notes.md
+            gh release upload "$TAG_NAME" release-dist/* --clobber
+          else
+            gh release create "$TAG_NAME" release-dist/* \
+              --title "Borizon $TAG_NAME" \
+              --notes-file notes.md \
+              --target "$GITHUB_SHA"
+          fi
