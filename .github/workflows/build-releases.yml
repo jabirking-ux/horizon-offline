@@ -51,12 +51,12 @@ jobs:
           sudo apt-get install -y libasound2-dev libvulkan-dev libwayland-dev libx11-dev libxkbcommon-dev libfontconfig1-dev
 
       - name: Build Launcher
-        run: cargo build --release --manifest-path launcher/Cargo.toml --target ${{ matrix.target }}
+        run: cargo build --profile dist --manifest-path launcher/Cargo.toml --target ${{ matrix.target }}
 
       - name: Package Artifact (Linux / macOS)
         if: runner.os != 'Windows'
         run: |
-          cd target/${{ matrix.target }}/release
+          cd target/${{ matrix.target }}/dist
           tar -czf ../../../${{ matrix.asset }} ${{ matrix.binary }}
           cd ../../..
 
@@ -64,7 +64,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path target/${{ matrix.target }}/release/${{ matrix.binary }} -DestinationPath ${{ matrix.asset }}
+          Compress-Archive -Path target/${{ matrix.target }}/dist/${{ matrix.binary }} -DestinationPath ${{ matrix.asset }}
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
@@ -99,13 +99,11 @@ jobs:
           TAG: ${{ github.event.inputs.tag_name || github.ref_name }}
         run: |
           TAG_NAME="${TAG:-v0.2.32-offline}"
-          gh release create "$TAG_NAME" release-dist/* \
-            --title "Horizon Offline $TAG_NAME" \
-            --notes "### Horizon Offline: More Optimized. Fully Offline.
-
-- Removed all Microsoft account, Xbox Live, and keyring persistence requirements.
-- Added direct Mojang asset pipeline from piston-meta, piston-data, and resources.download.minecraft.net.
-- Full offline launch support after setup.
-- Leaner dependencies and faster cold starts." \
-            --draft=false \
-            --prerelease=false || true
+          {
+            echo "Horizon Offline: more optimized, fully offline."
+            echo ""
+            echo "- No Microsoft account, Xbox Live or keyring code."
+            echo "- The prepare step downloads the client, libraries, assets and sounds straight from Mojang and checks every SHA-1."
+            echo "- Launch offline once setup is done."
+          } > notes.md
+          gh release create "$TAG_NAME" release-dist/* --title "Horizon Offline $TAG_NAME" --notes-file notes.md --target "$GITHUB_SHA"
