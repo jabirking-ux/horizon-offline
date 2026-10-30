@@ -9,10 +9,10 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-pub const REPO: &str = "horizon-rust/horizon";
-pub const README_URL: &str = "https://github.com/horizon-rust/horizon/blob/main/launcher/README.md";
+pub const REPO: &str = "jabirking-ux/horizon-offline";
+pub const README_URL: &str = "https://github.com/jabirking-ux/horizon-offline/blob/main/launcher/README.md";
 /// The players' page on connecting an AI agent (the website's docs/agents.md).
-pub const AGENT_DOCS_URL: &str = "https://playhorizon.dev/docs/agents";
+pub const AGENT_DOCS_URL: &str = "https://jabirking-ux.github.io/horizon-offline-site/";
 /// This launcher's version: the release workflow sets `HORIZON_LAUNCHER_VERSION` from the
 /// tag it builds (no version-bump commits); other builds say Cargo.toml's.
 pub const VERSION: &str = version_or(option_env!("HORIZON_LAUNCHER_VERSION"));
@@ -2403,7 +2403,7 @@ fn launcher_update_from(releases: &[Release], own: &str) -> Option<Release> {
 pub fn releases_and_updates(
     on_releases: impl FnOnce(Result<Vec<Release>, String>),
 ) -> Result<Updates, String> {
-    releases_and_updates_with(release_list, installed, |_| Vec::new(), on_releases)
+    releases_and_updates_with(release_list, installed, launcher_releases_in, on_releases)
 }
 
 fn releases_and_updates_with(
@@ -2488,7 +2488,7 @@ pub fn exe_path() -> &'static Path {
 
 /// Development builds and `HORIZON_LAUNCHER_NO_SELF_UPDATE` never replace themselves.
 pub fn self_update_allowed() -> bool {
-    false
+    !cfg!(debug_assertions) && std::env::var_os("HORIZON_LAUNCHER_NO_SELF_UPDATE").is_none()
 }
 
 /// The version in `horizon-launcher --version`'s output (`horizon-launcher 0.1.5`).
@@ -3202,7 +3202,8 @@ mod tests {
         for (pass, signed_in) in [(Err(account::NoOwner), true), (no_owner(), true)] {
             assert!(download_for(&pins, &dir, pass, signed_in, &fetch, &log).is_err());
         }
-        assert!(asked.lock().unwrap().is_empty());
+        // In offline mode, download is always attempted directly from Mojang
+        assert!(!asked.lock().unwrap().is_empty());
         let _ = fs::remove_dir_all(&dir);
 
         // In the sources: one call downloads the game, in `download_for`, and the only caller

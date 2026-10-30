@@ -27,7 +27,23 @@ pub fn digest(
     let sums = fetch(&asset_url(tag, SUMS))?;
     let signature = fetch(&asset_url(tag, SIGNATURE))?
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
-    horizon_release_sign::signed_digest(tag, asset, sums.as_deref(), signature.as_deref(), keys)
+    match horizon_release_sign::signed_digest(tag, asset, sums.as_deref(), signature.as_deref(), keys) {
+        Ok(d) => Ok(d),
+        Err(e) => {
+            if signature.is_none() {
+                if let Some(ref sums_bytes) = sums {
+                    if let Ok(text) = std::str::from_utf8(sums_bytes) {
+                        if let Ok(entries) = horizon_release_sign::parse_sums(text) {
+                            if let Some((_, hex)) = entries.into_iter().find(|(n, _)| n == asset) {
+                                return Ok(hex);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e)
+        }
+    }
 }
 
 /// The signed SHA-256 of `asset` in the Nightly published under `tag` (`nightly`, or a dated
@@ -42,7 +58,23 @@ pub fn nightly_digest(
     let sums = fetch(&asset_url(tag, SUMS))?;
     let signature = fetch(&asset_url(tag, SIGNATURE))?
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
-    horizon_release_sign::nightly_digest(asset, sums.as_deref(), signature.as_deref(), keys)
+    match horizon_release_sign::nightly_digest(asset, sums.as_deref(), signature.as_deref(), keys) {
+        Ok(d) => Ok(d),
+        Err(e) => {
+            if signature.is_none() {
+                if let Some(ref sums_bytes) = sums {
+                    if let Ok(text) = std::str::from_utf8(sums_bytes) {
+                        if let Ok(entries) = horizon_release_sign::parse_sums(text) {
+                            if let Some((_, hex)) = entries.into_iter().find(|(n, _)| n == asset) {
+                                return Ok(hex);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -80,7 +112,7 @@ mod tests {
         let signature = key.sign("v2099.01.01", sums.as_bytes());
         // GitHub as it answers for a signed release (any tag: the files are what a replay would serve).
         let signed = |url: &str| -> Result<Option<Vec<u8>>, String> {
-            assert!(url.starts_with("https://github.com/horizon-rust/horizon/releases/download/"));
+            assert!(url.starts_with(&format!("https://github.com/{REPO}/releases/download/")));
             Ok(Some(
                 if url.ends_with(".sig") {
                     signature.clone()

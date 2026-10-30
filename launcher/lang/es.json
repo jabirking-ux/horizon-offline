@@ -200,10 +200,8 @@
   "Alpha": "Alfa",
   "Loader": "Cargador",
   "newest stable version": "última versión estable",
-  "Play downloads the game from Mojang directly the first time, with the Java it needs.": "Jugar descarga el juego de Mojang directamente la primera vez, con el Java que necesita.",
   "Mojang's version list isn't here yet.": "La lista de versiones de Mojang aún no ha llegado.",
   "Sign in to play": "Inicia sesión para jugar",
-  "No Minecraft install needed: Horizon downloads it directly from Mojang.": "No hace falta tener Minecraft instalado: Horizon lo descarga directamente de Mojang.",
   "Waiting for Microsoft… the window goes on by itself.": "Esperando a Microsoft… la ventana seguirá sola.",
   "Downloading Minecraft {version} from Mojang · {done} of {total} files": "Descargando Minecraft {version} de Mojang · {done} de {total} archivos",
   "Downloading from Mojang · {done} of {total} files": "Descargando de Mojang · {done} de {total} archivos",
@@ -211,5 +209,7 @@
   "about a minute left": "queda un minuto aprox.",
   "about {n} min left": "quedan unos {n} min",
   "Game files": "Archivos del juego",
-  "Sounds": "Sonidos"
+  "Sounds": "Sonidos",
+  "No Minecraft install needed: Horizon downloads it from Mojang for your account.": "No hace falta tener Minecraft instalado: Horizon lo descarga directamente de Mojang.",
+  "Play downloads the game from Mojang for your account the first time, with the Java it needs.": "Jugar descarga el juego de Mojang directamente la primera vez, con el Java que necesita."
 }

@@ -71,9 +71,9 @@ jobs:
           $srcExe = (Resolve-Path "launcher/target/${{ matrix.target }}/dist/${{ matrix.binary }}").Path
           $icon = (Resolve-Path "packaging/icons/horizon.ico").Path
           if (Get-Command makensis -ErrorAction SilentlyContinue) {
-            makensis /DVERSION=$ver "/DSOURCE_EXE=$srcExe" "/DICON_FILE=$icon" /DOUT_FILE=Horizon-Offline-Setup.exe packaging/windows/installer.nsi
+            makensis /DVERSION=$ver "/DSOURCE_EXE=$srcExe" "/DICON_FILE=$icon" /DOUT_FILE=Borizon-Setup.exe packaging/windows/installer.nsi
           } else {
-            & "C:\Program Files (x86)\NSIS\makensis.exe" /DVERSION=$ver "/DSOURCE_EXE=$srcExe" "/DICON_FILE=$icon" /DOUT_FILE=Horizon-Offline-Setup.exe packaging/windows/installer.nsi
+            & "C:\Program Files (x86)\NSIS\makensis.exe" /DVERSION=$ver "/DSOURCE_EXE=$srcExe" "/DICON_FILE=$icon" /DOUT_FILE=Borizon-Setup.exe packaging/windows/installer.nsi
           }
 
       - name: Upload Artifact
@@ -82,7 +82,7 @@ jobs:
           name: ${{ matrix.asset }}
           path: |
             ${{ matrix.asset }}
-            Horizon-Offline-Setup.exe
+            Borizon-Setup.exe
           if-no-files-found: ignore
 
   release:

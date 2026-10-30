@@ -18,20 +18,20 @@
   !define ICON_FILE "..\icons\horizon.ico"
 !endif
 
-!define PRODUCT_NAME "Horizon Offline"
-!define PRODUCT_PUBLISHER "Horizon Offline"
+!define PRODUCT_NAME "Borizon"
+!define PRODUCT_PUBLISHER "Borizon"
 !define PRODUCT_WEB_SITE "https://jabirking-ux.github.io/horizon-offline-site"
 !define PRODUCT_EXE "horizon-launcher.exe"
-!define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\HorizonOffline"
+!define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Borizon"
 !define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\${PRODUCT_EXE}"
 
 !ifndef OUT_FILE
-  !define OUT_FILE "..\..\Horizon-Offline-Setup-${VERSION}.exe"
+  !define OUT_FILE "..\..\Borizon-Setup-${VERSION}.exe"
 !endif
 
 Name "${PRODUCT_NAME} ${VERSION}"
 OutFile "${OUT_FILE}"
-InstallDir "$LOCALAPPDATA\Programs\HorizonOffline"
+InstallDir "$LOCALAPPDATA\Programs\Borizon"
 InstallDirRegKey HKCU "${PRODUCT_DIR_REGKEY}" ""
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
@@ -39,7 +39,7 @@ SetCompressor /SOLID lzma
 VIProductVersion "${VERSION}.0"
 VIAddVersionKey "ProductName" "${PRODUCT_NAME}"
 VIAddVersionKey "CompanyName" "${PRODUCT_PUBLISHER}"
-VIAddVersionKey "LegalCopyright" "Horizon Contributors"
+VIAddVersionKey "LegalCopyright" "Borizon Contributors"
 VIAddVersionKey "FileDescription" "${PRODUCT_NAME} Installer"
 VIAddVersionKey "FileVersion" "${VERSION}.0"
 VIAddVersionKey "ProductVersion" "${VERSION}.0"
@@ -50,7 +50,7 @@ VIAddVersionKey "ProductVersion" "${VERSION}.0"
 
 ; Welcome page
 !define MUI_WELCOMEPAGE_TITLE "Install or Update ${PRODUCT_NAME}"
-!define MUI_WELCOMEPAGE_TEXT "Setup will install or update ${PRODUCT_NAME} on your computer.$\r$\n$\r$\nHorizon Offline is fully offline with direct Mojang downloads and zero Microsoft account dependencies.$\r$\n$\r$\nClick Next to continue."
+!define MUI_WELCOMEPAGE_TEXT "Setup will install or update ${PRODUCT_NAME} on your computer.$\r$\n$\r$\nBorizon is fully offline with direct Mojang downloads and zero Microsoft account dependencies.$\r$\n$\r$\nClick Next to continue."
 !insertmacro MUI_PAGE_WELCOME
 
 ; Directory page

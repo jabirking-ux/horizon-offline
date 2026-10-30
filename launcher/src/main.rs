@@ -2227,7 +2227,7 @@ impl Launcher {
                 .child(
                     shell::text(theme::night::TITLE, shell::c(n.ink))
                         .font_family(theme::DISPLAY_FONT)
-                        .child("Horizon"),
+                        .child("Borizon"),
                 )
         });
         shell::sidebar_plate(&t)
@@ -2423,7 +2423,7 @@ impl Launcher {
             if no_install {
                 format!("Not prepared. Play downloads Minecraft {version} directly from Mojang and prepares it.")
             } else {
-                format!("Not prepared. Horizon can download Minecraft {version} directly from Mojang, or use your own install.")
+                format!("Not prepared. Borizon can download Minecraft {version} directly from Mojang, or use your own install.")
             }
         } else {
             backend::resources_summary(prepared, !silent, &version)
@@ -3003,7 +3003,7 @@ impl Launcher {
                     .child(group("AI", "terminal"))
                     .child(self.no_ai_row(n + 6, cx))
                     .child(group("About", "info-box"))
-                    .child(index_row(n + 7, "Horizon", Some(plain(&horizon)), horizon_action, &t))
+                    .child(index_row(n + 7, "Borizon", Some(plain(&horizon)), horizon_action, &t))
                     .child(index_row(
                         n + 8,
                         tr("Launcher"),
@@ -3359,7 +3359,7 @@ impl Launcher {
         rows = rows.child(index_row(
             n,
             "Offline mode",
-            Some(div().child("Horizon Offline runs completely without Microsoft accounts or sign-in requirements. Files are fetched directly from Mojang.").into_any_element()),
+            Some(div().child("Borizon runs completely without Microsoft accounts or sign-in requirements. Files are fetched directly from Mojang.").into_any_element()),
             None,
             &t,
         ));
@@ -4101,8 +4101,8 @@ fn key_bindings() -> Vec<KeyBinding> {
 fn menus() -> Vec<Menu> {
     vec![
         Menu {
-            name: "Horizon Launcher".into(),
-            items: vec![MenuItem::action("Quit Horizon Launcher", Quit)],
+            name: "Borizon Launcher".into(),
+            items: vec![MenuItem::action("Quit Borizon Launcher", Quit)],
         },
         Menu {
             name: "Window".into(),
@@ -4157,7 +4157,7 @@ fn main() {
                     titlebar: Some(titlebar::options()),
                     #[cfg(target_os = "linux")]
                     window_decorations: Some(gpui::WindowDecorations::Client),
-                    app_id: Some("dev.playhorizon.offline.launcher".into()),
+                    app_id: Some("dev.borizon.launcher".into()),
                     ..Default::default()
                 },
                 |window, cx| cx.new(|cx| Launcher::new(window, cx)),
@@ -4233,10 +4233,10 @@ mod tests {
     #[test]
     fn the_app_menu_has_quit() {
         let menus = super::menus();
-        assert_eq!(menus[0].name, "Horizon Launcher");
+        assert_eq!(menus[0].name, "Borizon Launcher");
         assert!(matches!(
             &menus[0].items[0],
-            gpui::MenuItem::Action { name, .. } if name == "Quit Horizon Launcher"
+            gpui::MenuItem::Action { name, .. } if name == "Quit Borizon Launcher"
         ));
     }
 
