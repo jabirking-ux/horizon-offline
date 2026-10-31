@@ -416,27 +416,79 @@ impl PalettedContainer {
         assert_eq!(out.len(), self.strategy.entries());
         match &self.palette {
             Palette::Single(value) => out.fill(*value),
-            Palette::List(list) => {
-                let bits = usize::from(self.bits);
-                let per = 64 / bits;
-                let m = mask(self.bits);
-                for (chunk, &word) in out.chunks_mut(per).zip(&self.words) {
-                    for (slot, cell) in chunk.iter_mut().enumerate() {
-                        let id = ((word >> (slot * bits)) & m) as usize;
-                        *cell = list[id];
+            Palette::List(list) => match self.bits {
+                4 => {
+                    for (chunk, &word) in out.chunks_exact_mut(16).zip(&self.words) {
+                        for slot in 0..16 {
+                            let id = ((word >> (slot * 4)) & 0xF) as usize;
+                            chunk[slot] = list[id];
+                        }
                     }
                 }
-            }
-            Palette::Global => {
-                let bits = usize::from(self.bits);
-                let per = 64 / bits;
-                let m = mask(self.bits);
-                for (chunk, &word) in out.chunks_mut(per).zip(&self.words) {
-                    for (slot, cell) in chunk.iter_mut().enumerate() {
-                        *cell = ((word >> (slot * bits)) & m) as u32;
+                5 => {
+                    for (chunk, &word) in out.chunks_mut(12).zip(&self.words) {
+                        for (slot, cell) in chunk.iter_mut().enumerate() {
+                            let id = ((word >> (slot * 5)) & 0x1F) as usize;
+                            *cell = list[id];
+                        }
                     }
                 }
-            }
+                6 => {
+                    for (chunk, &word) in out.chunks_mut(10).zip(&self.words) {
+                        for (slot, cell) in chunk.iter_mut().enumerate() {
+                            let id = ((word >> (slot * 6)) & 0x3F) as usize;
+                            *cell = list[id];
+                        }
+                    }
+                }
+                7 => {
+                    for (chunk, &word) in out.chunks_mut(9).zip(&self.words) {
+                        for (slot, cell) in chunk.iter_mut().enumerate() {
+                            let id = ((word >> (slot * 7)) & 0x7F) as usize;
+                            *cell = list[id];
+                        }
+                    }
+                }
+                8 => {
+                    for (chunk, &word) in out.chunks_exact_mut(8).zip(&self.words) {
+                        for slot in 0..8 {
+                            let id = ((word >> (slot * 8)) & 0xFF) as usize;
+                            chunk[slot] = list[id];
+                        }
+                    }
+                }
+                _ => {
+                    let bits = usize::from(self.bits);
+                    let per = 64 / bits;
+                    let m = mask(self.bits);
+                    for (chunk, &word) in out.chunks_mut(per).zip(&self.words) {
+                        for (slot, cell) in chunk.iter_mut().enumerate() {
+                            let id = ((word >> (slot * bits)) & m) as usize;
+                            *cell = list[id];
+                        }
+                    }
+                }
+            },
+            Palette::Global => match self.bits {
+                16 => {
+                    for (chunk, &word) in out.chunks_exact_mut(4).zip(&self.words) {
+                        chunk[0] = (word & 0xFFFF) as u32;
+                        chunk[1] = ((word >> 16) & 0xFFFF) as u32;
+                        chunk[2] = ((word >> 32) & 0xFFFF) as u32;
+                        chunk[3] = (word >> 48) as u32;
+                    }
+                }
+                _ => {
+                    let bits = usize::from(self.bits);
+                    let per = 64 / bits;
+                    let m = mask(self.bits);
+                    for (chunk, &word) in out.chunks_mut(per).zip(&self.words) {
+                        for (slot, cell) in chunk.iter_mut().enumerate() {
+                            *cell = ((word >> (slot * bits)) & m) as u32;
+                        }
+                    }
+                }
+            },
         }
     }
     /// A container holding `values` in the smallest configuration for their

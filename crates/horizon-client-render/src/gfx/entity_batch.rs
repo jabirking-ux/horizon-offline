@@ -30,6 +30,7 @@ pub const TRANSLUCENT_GLINT_ITEM_OVERLAY: u32 = 33;
 pub const TEXT_POLYGON_OFFSET_OVERLAY: u32 = 35;
 
 /// The material of a quad by its overlay (`MATERIALS` order).
+#[inline(always)]
 fn material(layer: u32) -> usize {
     match layer {
         TEXT_POLYGON_OFFSET_OVERLAY => 1,

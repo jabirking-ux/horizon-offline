@@ -712,8 +712,15 @@ impl Padded {
                     let row_src = ((y as usize) << 8) | ((z as usize) << 4);
                     blocks[row_dst..row_dst + 16].copy_from_slice(&own[row_src..row_src + 16]);
                     let c = region[1][1].unwrap();
-                    for x in 0..16 {
-                        light[row_dst + x as usize] = c.light(x, wy, z);
+                    let sec = &c.sections[sy as usize];
+                    match &sec.light {
+                        crate::chunk::Light::Uniform(v) => {
+                            light[row_dst..row_dst + 16].fill(*v);
+                        }
+                        crate::chunk::Light::Full(arr) => {
+                            light[row_dst..row_dst + 16]
+                                .copy_from_slice(&arr[row_src..row_src + 16]);
+                        }
                     }
                     for x in [-2, -1, 16, 17] {
                         let chunk = region[((z + 16) >> 4) as usize][((x + 16) >> 4) as usize];
@@ -891,11 +898,13 @@ impl<'a> Tints<'a> {
     }
 }
 /// Packs 8-bit RGB into the vertex's RGBA8 (red in the low byte), opaque.
+#[inline(always)]
 fn pack_rgb([r, g, b]: [u32; 3]) -> u32 {
     0xFF00_0000 | b << 16 | g << 8 | r
 }
 /// Vanilla light coords (block*16 in the low half, sky*16 in the high half) to
 /// the vertex layout (sky*16 in bits 0..8, block*16 in bits 8..16).
+#[inline(always)]
 fn pack_coords(coords: u32) -> u16 {
     ((coords >> 16 & 0xFF) | (coords & 0xFF) << 8) as u16
 }
@@ -1040,6 +1049,7 @@ impl Mesher<'_> {
         out
     }
     /// `BlockColors` tint source `index`, or `None` for an untinted (-1) layer.
+    #[inline]
     fn tint(state: &Info, index: i32, tints: &mut Tints, [x, y, z]: [i32; 3]) -> Option<u32> {
         if index < 0 || index >= i32::from(state.tint_count) {
             return None;
@@ -1057,6 +1067,7 @@ impl Mesher<'_> {
             Tint::Stem(age) => stem_color(age),
         })
     }
+    #[inline]
     #[allow(clippy::too_many_arguments)]
     fn face(
         &self,

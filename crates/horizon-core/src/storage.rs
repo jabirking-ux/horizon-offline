@@ -23,7 +23,7 @@ pub(crate) const MAGIC_LEN: usize = 1 << 14;
 /// so only the x86 targets take the table.
 const MAGIC_BEATS_DIVISION: bool = cfg!(any(target_arch = "x86", target_arch = "x86_64"));
 /// The word and bit shift of entry `i`; exact for `i < MAGIC_LEN`.
-#[inline]
+#[inline(always)]
 pub(crate) fn locate(bits: u8, i: usize) -> (usize, u32) {
     if bits.is_power_of_two() {
         // 64 / bits is a power of two: shifts instead of the multiplication.
@@ -36,7 +36,7 @@ pub(crate) fn locate(bits: u8, i: usize) -> (usize, u32) {
         (word as usize, i as u32 * u32::from(bits) - word * filled)
     }
 }
-#[inline]
+#[inline(always)]
 pub(crate) fn mask(bits: u8) -> u64 {
     (1u64 << bits) - 1
 }

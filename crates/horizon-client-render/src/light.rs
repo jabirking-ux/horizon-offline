@@ -266,6 +266,25 @@ const OFFSETS: [(i32, i32, i32); 6] = [
     (1, 0, 0),
 ];
 
+thread_local! {
+    static LIGHT_SCRATCH: std::cell::RefCell<(
+        Vec<u16>,
+        Vec<u8>,
+        Vec<u8>,
+        VecDeque<u32>,
+        VecDeque<u32>,
+        Box<[u32; 4096]>,
+    )> = RefCell::new((
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        VecDeque::new(),
+        VecDeque::new(),
+        Box::new([0u32; 4096]),
+    ));
+}
+use std::cell::RefCell;
+
 /// `region[dz][dx]` holds the chunks around the centre (index 1,1).
 /// `sky` is false in dimensions without skylight (the Nether).
 pub fn light_chunk(
@@ -288,141 +307,147 @@ pub fn light_chunk(
     // up to 14 blocks into it (sky light there is always 15).
     let h = ((top_section + 1) * 16).min(sections * 16);
     let at = |x: usize, y: usize, z: usize| (y * W + z) * W + x;
-    // Packed cells (`type << 4 | dampening`), not state ids: the flood fill
-    // then never touches the large `LightTables::cells` table.
-    let mut states = vec![0u16; W * W * h];
-    let mut sky = vec![0u8; W * W * h];
-    let mut block = vec![0u8; W * W * h];
-    let mut queue = VecDeque::new();
-    let mut sky_queue = VecDeque::new();
-    let mut ids = Box::new([0u32; 4096]);
-    for (dz, row) in region.iter().enumerate() {
-        for (dx, chunk) in row.iter().enumerate() {
-            let Some(chunk) = chunk else { continue };
-            for (si, section) in chunk.sections.iter().enumerate().take(top_section) {
-                if section.is_uniform(0) {
-                    continue;
-                }
-                section.unpack(&mut ids);
-                for (i, &id) in ids.iter().enumerate() {
-                    let (lx, lz, ly) = (i & 15, (i >> 4) & 15, i >> 8);
-                    let p = at(dx * 16 + lx, si * 16 + ly, dz * 16 + lz);
-                    let info = tables.info[id as usize];
-                    states[p] = info as u16;
-                    let emission = info >> 16;
-                    if emission > 0 {
-                        block[p] = emission as u8;
-                        queue.push_back(p as u32);
+    LIGHT_SCRATCH.with(|scratch| {
+        let (states, sky, block, queue, sky_queue, ids) = &mut *scratch.borrow_mut();
+        // Packed cells (`type << 4 | dampening`), not state ids: the flood fill
+        // then never touches the large `LightTables::cells` table.
+        let vol = W * W * h;
+        states.clear();
+        states.resize(vol, 0u16);
+        sky.clear();
+        sky.resize(vol, 0u8);
+        block.clear();
+        block.resize(vol, 0u8);
+        queue.clear();
+        sky_queue.clear();
+        for (dz, row) in region.iter().enumerate() {
+            for (dx, chunk) in row.iter().enumerate() {
+                let Some(chunk) = chunk else { continue };
+                for (si, section) in chunk.sections.iter().enumerate().take(top_section) {
+                    if section.is_uniform(0) {
+                        continue;
                     }
-                }
-            }
-        }
-    }
-    // Columns of missing neighbour chunks neither hold nor pass light.
-    let mut present = vec![false; W * W];
-    for z in 0..W {
-        for x in 0..W {
-            present[z * W + x] = region[z / 16][x / 16].is_some();
-        }
-    }
-    let mut lowest = vec![h as i32; W * W];
-    for z in 0..W {
-        for x in 0..W {
-            if !present[z * W + x] || !sky_light {
-                continue;
-            }
-            // The top layer (above the occupied range) is always open sky.
-            let mut y = h as i32 - 1;
-            sky[at(x, y as usize, z)] = 15;
-            while y > 0
-                && !tables.packed_edge_occluded(
-                    states[at(x, y as usize, z)],
-                    states[at(x, y as usize - 1, z)],
-                )
-            {
-                y -= 1;
-                sky[at(x, y as usize, z)] = 15;
-            }
-            lowest[z * W + x] = y;
-        }
-    }
-    for z in 0..W {
-        for x in 0..W {
-            if !present[z * W + x] || !sky_light {
-                continue;
-            }
-            let own = lowest[z * W + x];
-            let mut deepest = own;
-            for (nx, nz) in [
-                (x.wrapping_sub(1), z),
-                (x + 1, z),
-                (x, z.wrapping_sub(1)),
-                (x, z + 1),
-            ] {
-                if nx < W && nz < W && present[nz * W + nx] {
-                    deepest = deepest.max(lowest[nz * W + nx]);
-                }
-            }
-            // Seed propagation from the source cells that border darker cells.
-            let from = own.max(0) as usize;
-            let to = (deepest as usize).min(h - 1);
-            for y in from..=to {
-                if sky[at(x, y, z)] == 15 {
-                    sky_queue.push_back(at(x, y, z) as u32);
-                }
-            }
-        }
-    }
-    let spread = |light: &mut [u8], queue: &mut VecDeque<u32>| {
-        while let Some(p) = queue.pop_front() {
-            let p = p as usize;
-            let level = light[p];
-            if level <= 1 {
-                continue;
-            }
-            let x = p % W;
-            let z = (p / W) % W;
-            let y = p / (W * W);
-            let from = states[p];
-            let col = z * W + x;
-            // Neighbours by linear offset; `present` only depends on the
-            // column, and the axis bounds rule out wrapping.
-            macro_rules! neighbour {
-                ($d:expr, $q:expr, $ncol:expr) => {{
-                    if present[$ncol] {
-                        let q = $q;
-                        let to = states[q];
-                        let next = level.saturating_sub((to & 0xF).max(1) as u8);
-                        if next > light[q] && !tables.packed_blocked(from, to, $d) {
-                            light[q] = next;
-                            queue.push_back(q as u32);
+                    section.unpack(ids);
+                    for (i, &id) in ids.iter().enumerate() {
+                        let (lx, lz, ly) = (i & 15, (i >> 4) & 15, i >> 8);
+                        let p = at(dx * 16 + lx, si * 16 + ly, dz * 16 + lz);
+                        let info = tables.info[id as usize];
+                        states[p] = info as u16;
+                        let emission = info >> 16;
+                        if emission > 0 {
+                            block[p] = emission as u8;
+                            queue.push_back(p as u32);
                         }
                     }
-                }};
-            }
-            if y > 0 {
-                neighbour!(0, p - W * W, col);
-            }
-            if y + 1 < h {
-                neighbour!(1, p + W * W, col);
-            }
-            if z > 0 {
-                neighbour!(2, p - W, col - W);
-            }
-            if z + 1 < W {
-                neighbour!(3, p + W, col + W);
-            }
-            if x > 0 {
-                neighbour!(4, p - 1, col - 1);
-            }
-            if x + 1 < W {
-                neighbour!(5, p + 1, col + 1);
+                }
             }
         }
-    };
-    spread(&mut sky, &mut sky_queue);
-    spread(&mut block, &mut queue);
-    pack_lighting(sections, h, &sky, &block, sky_light)
+        // Columns of missing neighbour chunks neither hold nor pass light.
+        let mut present = [false; W * W];
+        for z in 0..W {
+            for x in 0..W {
+                present[z * W + x] = region[z / 16][x / 16].is_some();
+            }
+        }
+        let mut lowest = [h as i32; W * W];
+        for z in 0..W {
+            for x in 0..W {
+                if !present[z * W + x] || !sky_light {
+                    continue;
+                }
+                // The top layer (above the occupied range) is always open sky.
+                let mut y = h as i32 - 1;
+                sky[at(x, y as usize, z)] = 15;
+                while y > 0
+                    && !tables.packed_edge_occluded(
+                        states[at(x, y as usize, z)],
+                        states[at(x, y as usize - 1, z)],
+                    )
+                {
+                    y -= 1;
+                    sky[at(x, y as usize, z)] = 15;
+                }
+                lowest[z * W + x] = y;
+            }
+        }
+        for z in 0..W {
+            for x in 0..W {
+                if !present[z * W + x] || !sky_light {
+                    continue;
+                }
+                let own = lowest[z * W + x];
+                let mut deepest = own;
+                for (nx, nz) in [
+                    (x.wrapping_sub(1), z),
+                    (x + 1, z),
+                    (x, z.wrapping_sub(1)),
+                    (x, z + 1),
+                ] {
+                    if nx < W && nz < W && present[nz * W + nx] {
+                        deepest = deepest.max(lowest[nz * W + nx]);
+                    }
+                }
+                // Seed propagation from the source cells that border darker cells.
+                let from = own.max(0) as usize;
+                let to = (deepest as usize).min(h - 1);
+                for y in from..=to {
+                    if sky[at(x, y, z)] == 15 {
+                        sky_queue.push_back(at(x, y, z) as u32);
+                    }
+                }
+            }
+        }
+        let spread = |light: &mut [u8], queue: &mut VecDeque<u32>| {
+            while let Some(p) = queue.pop_front() {
+                let p = p as usize;
+                let level = light[p];
+                if level <= 1 {
+                    continue;
+                }
+                let x = p % W;
+                let z = (p / W) % W;
+                let y = p / (W * W);
+                let from = states[p];
+                let col = z * W + x;
+                // Neighbours by linear offset; `present` only depends on the
+                // column, and the axis bounds rule out wrapping.
+                macro_rules! neighbour {
+                    ($d:expr, $q:expr, $ncol:expr) => {{
+                        if present[$ncol] {
+                            let q = $q;
+                            let to = states[q];
+                            let next = level.saturating_sub((to & 0xF).max(1) as u8);
+                            if next > light[q] && !tables.packed_blocked(from, to, $d) {
+                                light[q] = next;
+                                queue.push_back(q as u32);
+                            }
+                        }
+                    }};
+                }
+                if y > 0 {
+                    neighbour!(0, p - W * W, col);
+                }
+                if y + 1 < h {
+                    neighbour!(1, p + W * W, col);
+                }
+                if z > 0 {
+                    neighbour!(2, p - W, col - W);
+                }
+                if z + 1 < W {
+                    neighbour!(3, p + W, col + W);
+                }
+                if x > 0 {
+                    neighbour!(4, p - 1, col - 1);
+                }
+                if x + 1 < W {
+                    neighbour!(5, p + 1, col + 1);
+                }
+            }
+        };
+        spread(sky, sky_queue);
+        spread(block, queue);
+        pack_lighting(sections, h, sky, block, sky_light)
+    })
 }
 
 /// Extract just the centre column's light (`sections` of it); never copy

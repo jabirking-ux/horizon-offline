@@ -110,10 +110,11 @@ impl Sides {
 
 /// The bucket of a quad: the axis plane it lies in and the side its
 /// triangles (corners 0, 1, 2 and 0, 2, 3, as the renderer draws them) face.
+#[inline(always)]
 fn bucket(quad: &[TerrainVertex; 4]) -> usize {
     let p = quad.map(|v| v.pos);
     for axis in 0..3 {
-        if p.iter().any(|v| v[axis] != p[0][axis]) {
+        if p[1][axis] != p[0][axis] || p[2][axis] != p[0][axis] || p[3][axis] != p[0][axis] {
             continue;
         }
         // The normal's component along `axis`, twice each triangle's area.
@@ -128,50 +129,69 @@ fn bucket(quad: &[TerrainVertex; 4]) -> usize {
             // Opposite windings, or no area at all.
             return OTHER;
         }
-        return BUCKETS
-            .iter()
-            .position(|b| matches!(*b, Bucket::Side(a, s) if a == axis && s == positive))
-            .expect("every side has a bucket");
+        return match (axis, positive) {
+            (0, true) => 0,
+            (2, true) => 1,
+            (1, true) => 3,
+            (2, false) => 4,
+            (0, false) => 5,
+            (1, false) => 6,
+            _ => OTHER,
+        };
     }
     OTHER
 }
 
+thread_local! {
+    static SIDES_SCRATCH: std::cell::RefCell<(Vec<u8>, Vec<[TerrainVertex; 4]>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
 /// Reorders `solid`'s quads by bucket, keeping their order inside each.
 pub fn sort(solid: &mut Vec<TerrainVertex>) -> Sides {
-    let (quads, rest) = solid.as_chunks::<4>();
-    debug_assert!(rest.is_empty(), "solid vertices come in quads");
-    let buckets: Vec<u8> = quads.iter().map(|q| bucket(q) as u8).collect();
-    let mut counts = [0u32; 7];
-    let mut planes = [0f32; 7];
-    for (quad, &b) in quads.iter().zip(&buckets) {
-        let b = usize::from(b);
-        if let Bucket::Side(axis, positive) = BUCKETS[b] {
-            let p = quad[0].pos[axis];
-            planes[b] = match (counts[b], positive) {
-                (0, _) => p,
-                (_, true) => planes[b].min(p),
-                (_, false) => planes[b].max(p),
-            };
+    if solid.is_empty() {
+        return Sides::default();
+    }
+    SIDES_SCRATCH.with(|scratch| {
+        let (buckets, sorted) = &mut *scratch.borrow_mut();
+        let (quads, rest) = solid.as_chunks::<4>();
+        debug_assert!(rest.is_empty(), "solid vertices come in quads");
+        buckets.clear();
+        buckets.reserve(quads.len());
+        let mut counts = [0u32; 7];
+        let mut planes = [0f32; 7];
+        for quad in quads {
+            let b = bucket(quad);
+            buckets.push(b as u8);
+            if let Bucket::Side(axis, positive) = BUCKETS[b] {
+                let p = quad[0].pos[axis];
+                planes[b] = match (counts[b], positive) {
+                    (0, _) => p,
+                    (_, true) => planes[b].min(p),
+                    (_, false) => planes[b].max(p),
+                };
+            }
+            counts[b] += 1;
         }
-        counts[b] += 1;
-    }
-    let mut ends = [0u32; 7];
-    let mut total = 0;
-    for (end, count) in ends.iter_mut().zip(counts) {
-        total += count;
-        *end = total;
-    }
-    if counts.iter().filter(|&&c| c > 0).count() > 1 {
-        let mut next: [u32; 7] = std::array::from_fn(|b| ends[b] - counts[b]);
-        let mut sorted = vec![quads[0]; quads.len()];
-        for (quad, &b) in quads.iter().zip(&buckets) {
-            let slot = &mut next[usize::from(b)];
-            sorted[*slot as usize] = *quad;
-            *slot += 1;
+        let mut ends = [0u32; 7];
+        let mut total = 0;
+        for (end, count) in ends.iter_mut().zip(counts) {
+            total += count;
+            *end = total;
         }
-        *solid = sorted.into_flattened();
-    }
-    Sides { ends, planes }
+        if counts.iter().filter(|&&c| c > 0).count() > 1 {
+            let mut next: [u32; 7] = std::array::from_fn(|b| ends[b] - counts[b]);
+            sorted.clear();
+            sorted.resize(quads.len(), quads[0]);
+            for (quad, &b) in quads.iter().zip(buckets.iter()) {
+                let slot = &mut next[usize::from(b)];
+                sorted[*slot as usize] = *quad;
+                *slot += 1;
+            }
+            solid.copy_from_slice(sorted.as_flattened());
+        }
+        Sides { ends, planes }
+    })
 }
 
 #[cfg(test)]

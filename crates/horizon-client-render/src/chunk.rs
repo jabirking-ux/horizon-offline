@@ -292,7 +292,7 @@ pub enum Light {
     Full(Box<[u8; 4096]>),
 }
 impl Light {
-    #[inline]
+    #[inline(always)]
     pub fn get(&self, i: usize) -> u8 {
         match self {
             Self::Uniform(v) => *v,
@@ -300,11 +300,11 @@ impl Light {
         }
     }
 }
-#[inline]
+#[inline(always)]
 fn column(x: i32, z: i32) -> usize {
     ((z & 15) << 4 | (x & 15)) as usize
 }
-#[inline]
+#[inline(always)]
 pub fn index(x: i32, y: i32, z: i32) -> usize {
     ((y & 15) << 8 | (z & 15) << 4 | (x & 15)) as usize
 }
