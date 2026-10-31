@@ -303,6 +303,7 @@ impl Launcher {
                     .flex()
                     .gap(px(10.))
                     .child(card(Loader::Fabric))
+                    .child(card(Loader::Forge))
                     .child(card(Loader::Quilt)),
             );
         }
@@ -344,6 +345,8 @@ mod tests {
         };
         assert_eq!(choice.default_name("1.21.4"), "Vanilla 1.21.4");
         choice.kind = NewKind::Modded;
+        choice.loader = Loader::Forge;
+        assert_eq!(choice.default_name("1.20.1"), "Forge 1.20.1");
         choice.loader = Loader::Quilt;
         assert_eq!(choice.default_name("1.21.4"), "Quilt 1.21.4");
         assert_eq!(choice.minecraft(None), None);

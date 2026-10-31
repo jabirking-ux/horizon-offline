@@ -1267,11 +1267,19 @@ impl Launcher {
             |index| self.mods.confirm_remove.as_ref() == Some(&entries[index].project),
             row,
         );
+        let conflict = horizon_mods::scan_mods_dir(&self.mods.home().join("mods"))
+            .has_fabric_and_forge_conflict();
         Some(
             div()
                 .flex()
                 .flex_col()
                 .gap(px(12.))
+                .when(conflict, |d| {
+                    d.child(notice(
+                        "MUTUAL EXCLUSION CONFLICT: You CANNOT use Fabric and Forge mods together in the same profile! Please separate them into distinct profiles (e.g., 'vanilla', 'fabric', 'forge').".into(),
+                        &t,
+                    ))
+                })
                 .child(
                     div()
                         .flex()

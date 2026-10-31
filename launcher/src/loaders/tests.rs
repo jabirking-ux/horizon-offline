@@ -51,7 +51,26 @@ fn versions_name_the_stable_ones() {
         "quilt-loader-0.19.2-1.21.4"
     );
     assert_eq!(Kind::parse(" Fabric ").unwrap(), Kind::Fabric);
-    assert!(Kind::parse("forge").is_err());
+    assert_eq!(Kind::parse("forge").unwrap(), Kind::Forge);
+    assert!(Kind::parse("neoforge").is_err());
+}
+
+#[test]
+fn forge_promotions_and_defaults() {
+    let promos = r#"{"promos": {"1.20.1-recommended": "47.3.0", "1.20.1-latest": "47.3.5"}}"#;
+    let listed = parse_forge_promotions(promos, "1.20.1").unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].version, "47.3.0");
+    assert!(listed[0].stable);
+    assert_eq!(listed[1].version, "47.3.5");
+    assert!(!listed[1].stable);
+
+    let defs = default_forge_versions("1.20.1");
+    assert_eq!(defs[0].version, "47.3.0");
+    assert_eq!(
+        Kind::Forge.profile_id("47.3.0", "1.20.1"),
+        "1.20.1-forge-47.3.0"
+    );
 }
 
 #[test]

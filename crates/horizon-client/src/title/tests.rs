@@ -954,7 +954,7 @@ fn new_world_generation_settings_round_trip() {
 fn each_world_preset_writes_its_own_generator() {
     let f = Fixture::new();
     let generator = |preset: crate::save::WorldPreset| {
-        let dir = f.root.join(preset.id());
+        let dir = f.root.join(preset.id().replace(':', "_"));
         let options = crate::save::WorldGen {
             preset,
             structures: true,

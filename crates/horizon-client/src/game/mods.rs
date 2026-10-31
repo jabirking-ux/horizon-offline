@@ -93,6 +93,16 @@ impl Game<'_> {
     /// (`tell_native_now`).
     pub(super) fn start_mods(&mut self) {
         let dir = Self::options_path().with_file_name(mod_list::DIR);
+        let mods_dir = Self::options_path().with_file_name("mods");
+        let report = horizon_mods::scan_mods_dir(&mods_dir);
+        let has_conflict = report.has_fabric_and_forge_conflict();
+        if has_conflict {
+            log::error!(
+                "MUTUAL EXCLUSION CONFLICT: Cannot use Fabric and Forge mods together in the same profile! Fabric: {:?}, Forge: {:?}",
+                report.fabric_mods,
+                report.forge_mods
+            );
+        }
         let mut paths = horizon_mods::find(&dir);
         paths.retain(|p| !self.mods.dev.contains(p));
         paths.extend(self.mods.dev.iter().cloned());
@@ -125,6 +135,20 @@ impl Game<'_> {
                 }
             })
             .collect();
+        if has_conflict {
+            self.settings.mods.installed.insert(0, Installed {
+                id: "conflict".into(),
+                title: "FATAL: Incompatible Mod Loaders".into(),
+                description: format!(
+                    "Cannot use Fabric ({}) and Forge ({}) mods together. Separate them into different profiles.",
+                    report.fabric_mods.join(", "),
+                    report.forge_mods.join(", ")
+                ),
+                problem: Some("Cannot use Fabric and Forge mods together. Separate into multiple profiles.".into()),
+                dev: false,
+                native: None,
+            });
+        }
         // A mod with a native version built in says so instead, and isn't news.
         self.list_native_mods();
         let installed = &self.settings.mods.installed;
