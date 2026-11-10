@@ -160,7 +160,9 @@ impl Game<'_> {
         }
         let guests = self.lan.iter().flat_map(|host| host.models.values());
         for m in self.mobs.iter().chain(guests) {
-            if !m.alive() {
+            // A mob with no effects swirls nothing: skipped before its size
+            // is worked out, which every mob in a crowded world would pay for.
+            if !m.alive() || (m.extra.effect_particles.is_empty() && m.extra.effects.is_empty()) {
                 continue;
             }
             let size = (f64::from(m.width()), f64::from(m.height()));

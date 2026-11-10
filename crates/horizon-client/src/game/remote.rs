@@ -4619,24 +4619,26 @@ impl Game<'_> {
         let player_team = board.players_team(&r.profile_name);
         let mut push = Vec3::ZERO;
         for m in &self.mobs {
-            let listed = r
-                .level_players
-                .get(&(m.id as i32))
-                .and_then(|uuid| r.tab_players.get(uuid));
-            let spectator = listed.is_some_and(|t| t.game_mode == SPECTATOR);
-            let mob_team = match listed {
-                Some(t) => board.players_team(&t.name),
-                None => teams.of(Who::Mob(m.id)),
-            };
-            // Bats never push; a spectator has no physics; passengers of the
-            // same vehicle never push each other.
+            // Bats never push, nor passengers of one vehicle; the box test
+            // comes before the lookups that far mobs never need.
             if !m.alive()
-                || spectator
                 || m.species() == horizon_client::mobs::Species::Bat
                 || self
                     .riding
                     .is_some_and(|v| v == m.id || m.extra.mount == Some(v))
                 || !m.bounds().intersects(bounds)
+            {
+                continue;
+            }
+            let listed = r
+                .level_players
+                .get(&(m.id as i32))
+                .and_then(|uuid| r.tab_players.get(uuid));
+            let mob_team = match listed {
+                Some(t) => board.players_team(&t.name),
+                None => teams.of(Who::Mob(m.id)),
+            };
+            if listed.is_some_and(|t| t.game_mode == SPECTATOR)
                 || !horizon_client::scoreboard::pushable_by(mob_team, player_team, true)
             {
                 continue;
