@@ -126,8 +126,11 @@ impl MobWorld<'_> {
             if fluids_block && self.facts.get(state).fluid != Fluid::None {
                 return Some(());
             }
-            if self.facts.is_air(state) {
+            if self.facts.is_air(state) || !self.collision.may_collide(state) {
                 return None;
+            }
+            if let Ok(Some(shape)) = self.collision.cached_shapes().cached_shape(state) {
+                return shape.clip(from, to, p).map(|_| ());
             }
             let shape = self
                 .collision
@@ -165,8 +168,11 @@ impl MobWorld<'_> {
         };
         let result = traverse_blocks(from, to, 512, |p: BlockPos| {
             let state = self.world.block(p.x, p.y, p.z);
-            if self.facts.is_air(state) {
+            if self.facts.is_air(state) || !self.collision.may_collide(state) {
                 return None;
+            }
+            if let Ok(Some(shape)) = self.collision.cached_shapes().cached_shape(state) {
+                return shape.clip(from, to, p).map(|hit| hit.location);
             }
             let shape = self
                 .collision
@@ -186,8 +192,11 @@ impl MobWorld<'_> {
         };
         let result = traverse_blocks(from, to, 512, |p: BlockPos| {
             let state = self.world.block(p.x, p.y, p.z);
-            if self.facts.is_air(state) {
+            if self.facts.is_air(state) || !self.collision.may_collide(state) {
                 return None;
+            }
+            if let Ok(Some(shape)) = self.collision.cached_shapes().cached_shape(state) {
+                return shape.clip(from, to, p).map(|_| [p.x, p.y, p.z]);
             }
             let shape = self
                 .collision
@@ -373,6 +382,9 @@ pub fn visual_clip<W: DynamicCollisionWorld>(
                 .move_by(Vec3::new(f64::from(p.x), f64::from(p.y), f64::from(p.z)))
                 .clip(from, to)
                 .map(|_| [p.x, p.y, p.z]);
+        }
+        if let Ok(Some(shape)) = collision.cached_shapes().cached_shape(id) {
+            return shape.clip(from, to, p).map(|_| [p.x, p.y, p.z]);
         }
         let shape = collision.collision_shape(scene, id, [p.x, p.y, p.z]).ok()?;
         shape.clip(from, to, p).map(|_| [p.x, p.y, p.z])

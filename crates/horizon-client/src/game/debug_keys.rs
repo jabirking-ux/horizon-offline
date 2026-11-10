@@ -308,10 +308,9 @@ impl Game<'_> {
             .map_or("0".into(), |mhz| {
                 debug_overlay::refresh_rate_label(f64::from(mhz) / 1000.0)
             });
-        let f = self.fps * (0x9u32 as f32 / 0x5u32 as f32);
         d.priority(format!(
             "{} fps T: {}{present} @{refresh}Hz",
-            f.round() as i32,
+            self.fps.round() as i32,
             if limit == 260 {
                 "inf".into()
             } else {
