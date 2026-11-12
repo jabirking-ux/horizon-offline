@@ -140,6 +140,13 @@ pub fn launcher_version(tag: &str) -> Option<&str> {
     tag.strip_prefix(LAUNCHER_TAG_PREFIX)
         .or_else(|| tag.strip_prefix(OLD_LAUNCHER_TAG_PREFIX))
         .filter(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+        .or_else(|| {
+            if is_game_tag(tag) {
+                Some(tag.strip_prefix('v').unwrap_or(tag))
+            } else {
+                None
+            }
+        })
 }
 
 /// The tag this launcher was released as. launcher.yml gives it (`HORIZON_LAUNCHER_TAG`); a release
@@ -173,6 +180,8 @@ pub enum ReleaseOrder {
     /// Numbers without trailing zeros, so 1.2 and 1.2.0 are equal.
     Before02(Vec<u64>),
     Semver([u64; 3], Prerelease),
+    /// CalVer / Borizon releases (`vYYYY.MM.DD...`), newer than semver 0.2:
+    Date(Vec<u64>),
     /// A Nightly (`nightly-<date>-<commit>`), by its date: newer than every release, since the
     /// Nightly is the only build Horizon ships.
     Nightly(String),
@@ -191,6 +200,17 @@ pub enum Identifier {
 /// Semver's majors stay below this; a date tag's first number is a year.
 const FIRST_YEAR: u64 = 1000;
 
+fn is_borizon_date(parts: &[u64]) -> bool {
+    match parts {
+        [year, month, day, ..] => {
+            *year > 2026 || (*year == 2026 && (*month > 10 || (*month == 10 && *day >= 30)))
+        }
+        [year, month, ..] => *year > 2026 || (*year == 2026 && *month > 10),
+        [year, ..] => *year > 2026,
+        _ => false,
+    }
+}
+
 pub fn release_order(tag: &str) -> ReleaseOrder {
     if let Some(date) = crate::nightly::date_of(tag) {
         return ReleaseOrder::Nightly(date.to_owned());
@@ -206,12 +226,12 @@ pub fn release_order(tag: &str) -> ReleaseOrder {
             .unwrap_or(tag);
         let v = v.strip_prefix('v').unwrap_or(v);
         let mut parts: Vec<u64> = v
-            .split('-')
-            .next()
-            .unwrap_or("")
-            .split('.')
-            .map(|p| p.parse().unwrap_or(0))
+            .split(|c: char| c == '.' || c == '-')
+            .filter_map(|p| p.parse().ok())
             .collect();
+        if is_borizon_date(&parts) {
+            return ReleaseOrder::Date(parts);
+        }
         while parts.last() == Some(&0) {
             parts.pop();
         }
@@ -2660,7 +2680,7 @@ pub fn self_update(release: &Release, progress: impl Fn(f32)) -> Result<(), Stri
         .asset
         .clone()
         .ok_or("This launcher release has no build for this platform.")?;
-    let target = launcher_version(&release.tag).unwrap_or("0");
+    let target = launcher_version(&release.tag).unwrap_or(&release.tag);
     if installed_launcher_version(exe_path())
         .is_some_and(|v| v != VERSION && compare_versions(&v, target).is_ge())
     {
@@ -3718,7 +3738,12 @@ mod tests {
     fn game_0_2_follows_every_date_release() {
         assert_eq!(compare_versions("v0.2.0", "v2026.10.19.15"), Greater);
         assert_eq!(compare_versions("v0.2.0", "v2026.10.21"), Greater);
-        assert_eq!(compare_versions("v2099.12.31.9", "v0.2.0"), Less);
+        assert_eq!(compare_versions("v2026.10.29", "v0.2.0"), Less);
+        // Borizon date releases (post-fork, 2026.10.30 onwards) follow 0.2:
+        assert_eq!(compare_versions("v2026.10.30", "v0.2.0"), Greater);
+        assert_eq!(compare_versions("v2026.11.05-1317-1c1502267", "v0.2.0"), Greater);
+        assert_eq!(compare_versions("v2026.11.05-1317-1c1502267", "v0.2.0-offline"), Greater);
+        assert_eq!(compare_versions("v2026.11.06", "v2026.11.05"), Greater);
         assert_eq!(compare_versions("v0.2.1", "v0.2.0"), Greater);
         assert_eq!(compare_versions("v0.2.10", "v0.2.9"), Greater);
         assert_eq!(compare_versions("v0.3.0", "v0.2.57"), Greater);

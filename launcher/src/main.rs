@@ -582,7 +582,7 @@ impl Launcher {
             return;
         }
         let version = backend::launcher_version(&release.tag)
-            .unwrap_or_default()
+            .unwrap_or(&release.tag)
             .to_string();
         self.self_update = SelfUpdate::Downloading(version, 0.);
         let tx = self.tx.clone();

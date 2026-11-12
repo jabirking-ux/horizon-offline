@@ -24,7 +24,10 @@ pub fn digest(
     if let Some(hex) = horizon_release_sign::legacy_digest(tag, asset) {
         return Ok(hex.to_owned());
     }
-    let sums = fetch(&asset_url(tag, SUMS))?;
+    let mut sums = fetch(&asset_url(tag, SUMS))?;
+    if sums.is_none() {
+        sums = fetch(&asset_url(tag, "SHA256SUMS.txt"))?;
+    }
     let signature = fetch(&asset_url(tag, SIGNATURE))?
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
     match horizon_release_sign::signed_digest(
@@ -61,7 +64,10 @@ pub fn nightly_digest(
     keys: &[PublicKey],
     fetch: impl Fn(&str) -> Result<Option<Vec<u8>>, String>,
 ) -> Result<String, String> {
-    let sums = fetch(&asset_url(tag, SUMS))?;
+    let mut sums = fetch(&asset_url(tag, SUMS))?;
+    if sums.is_none() {
+        sums = fetch(&asset_url(tag, "SHA256SUMS.txt"))?;
+    }
     let signature = fetch(&asset_url(tag, SIGNATURE))?
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
     match horizon_release_sign::nightly_digest(asset, sums.as_deref(), signature.as_deref(), keys) {

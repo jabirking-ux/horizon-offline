@@ -58,6 +58,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libvulkan-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libfontconfig1-dev libudev-dev
 
+      - name: Compute Build Metadata
+        shell: bash
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          DATE_TAG=$(date -u +%Y.%m.%d-%H%M)
+          echo "HORIZON_LAUNCHER_TAG=v${DATE_TAG}-${SHORT_SHA}" >> $GITHUB_ENV
+          echo "HORIZON_LAUNCHER_VERSION=${DATE_TAG}" >> $GITHUB_ENV
+
       - name: Build Launcher
         run: cargo build --profile dist --manifest-path launcher/Cargo.toml --target ${{ matrix.target }}
 
@@ -147,8 +155,9 @@ jobs:
           mkdir -p release-dist
           find artifacts -type f -exec cp {} release-dist/ \;
           cd release-dist
-          sha256sum * > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          sha256sum * > SHA256SUMS
+          cp SHA256SUMS SHA256SUMS.txt
+          cat SHA256SUMS
 
       - name: Publish Release
         env:
@@ -202,4 +211,20 @@ jobs:
               --title "Borizon $TAG_NAME" \
               --notes-file notes.md \
               --target "$GITHUB_SHA"
+          fi
+
+          # Also publish launcher release so older unpatched launchers can auto-update
+          LAUNCHER_TAG="launcher@0.2.62"
+          mkdir -p launcher-dist
+          cp release-dist/horizon-launcher-* launcher-dist/ 2>/dev/null || true
+          cp release-dist/SHA256SUMS* launcher-dist/ 2>/dev/null || true
+          if [ -f launcher-dist/SHA256SUMS ]; then
+            if gh release view "$LAUNCHER_TAG" >/dev/null 2>&1; then
+              gh release upload "$LAUNCHER_TAG" launcher-dist/* --clobber
+            else
+              gh release create "$LAUNCHER_TAG" launcher-dist/* \
+                --title "Borizon Launcher $LAUNCHER_TAG" \
+                --notes "Auto-update bundle for existing Borizon launchers" \
+                --target "$GITHUB_SHA"
+            fi
           fi
