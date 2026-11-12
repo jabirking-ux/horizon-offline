@@ -229,35 +229,37 @@ impl<T> Resident<T> {
             }
             let col_ox = f64::from(column.x * 16) - camera.x;
             let col_oz = f64::from(column.z * 16) - camera.z;
+            let col_min_x = col_ox as f32;
+            let col_min_z = col_oz as f32;
             let low_oy = min_y_base + f64::from(column.low * 16);
             let high_oy = min_y_base + f64::from(column.high * 16);
-            let min = Vec3::new(col_ox as f32, low_oy as f32, col_oz as f32);
-            let max = Vec3::new(
-                col_ox as f32 + 16.0,
-                high_oy as f32 + 16.0,
-                col_oz as f32 + 16.0,
-            );
+            let min = Vec3::new(col_min_x, low_oy as f32, col_min_z);
+            let max = Vec3::new(col_min_x + 16.0, high_oy as f32 + 16.0, col_min_z + 16.0);
             let inside = frustum.contains(min, max);
             if !inside && !frustum.intersects(min, max) {
                 continue;
             }
+            let col_center_x = col_ox + 8.0;
+            let col_center_z = col_oz + 8.0;
+            let horizontal_dist_sq = col_center_x * col_center_x + col_center_z * col_center_z;
             for &(y, slot) in &column.sections {
                 let key = (column.x, y, column.z);
                 if near && !reachable(key) {
                     continue;
                 }
                 let sec_oy = min_y_base + f64::from(y * 16);
-                let sec_origin = DVec3::new(col_ox, sec_oy, col_oz);
-                let sec_min = Vec3::new(col_ox as f32, sec_oy as f32, col_oz as f32);
+                let sec_min_y = sec_oy as f32;
+                let sec_min = Vec3::new(col_min_x, sec_min_y, col_min_z);
                 if !inside && !frustum.intersects(sec_min, sec_min + Vec3::splat(16.0)) {
                     continue;
                 }
-                let d = (sec_origin + DVec3::splat(8.0)).length_squared();
+                let sec_center_y = sec_oy + 8.0;
+                let d = horizontal_dist_sq + sec_center_y * sec_center_y;
                 out.push(Visible {
                     distance: d.to_bits(),
                     key,
                     slot,
-                    origin: sec_min.to_array(),
+                    origin: [col_min_x, sec_min_y, col_min_z],
                 });
             }
         }

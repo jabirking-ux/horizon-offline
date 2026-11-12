@@ -9,6 +9,7 @@ use super::{
     chunks::ChunkEncoder,
     data::SyncData,
     entity::{Entities, EntityState, Viewer},
+    equipment_cache,
     guest::{Guest, SentEffect, stack_to_network},
 };
 use crate::{
@@ -1876,6 +1877,21 @@ impl Hub {
         out
     }
 
+    /// The equipment of a placed guest; only the stacks that changed since the last call are converted.
+    fn guest_equipment(&mut self, i: usize) -> Vec<(u8, Option<horizon_protocol::item::Stack>)> {
+        for index in 0..equipment_cache::SLOTS {
+            let g = &self.guests[i];
+            let source = equipment_source(g, index);
+            if !g.equipment.is_stale(index, source) {
+                continue;
+            }
+            let source = source.cloned();
+            let converted = self.stack(&source);
+            self.guests[i].equipment.store(index, source, converted);
+        }
+        self.guests[i].equipment.equipment()
+    }
+
     /// All entities as one client sees them: the world's, the host, the other guests.
     fn track_entities(&mut self, ctx: &mut TickCtx) {
         let mut all: Vec<EntityState> =
@@ -1910,16 +1926,7 @@ impl Hub {
         let guest_states: Vec<_> = placed
             .into_iter()
             .map(|i| {
-                let (main, off, armor) = {
-                    let g = &self.guests[i];
-                    (
-                        g.inventory.get(g.selected).cloned().flatten(),
-                        g.offhand.clone(),
-                        g.armor.clone(),
-                    )
-                };
-                let equipment =
-                    self.equipment_of(&main, &off, [&armor[0], &armor[1], &armor[2], &armor[3]]);
+                let equipment = self.guest_equipment(i);
                 let g = &self.guests[i];
                 let mut state = self.player_state(
                     g.entity_id,
@@ -3006,6 +3013,15 @@ fn shared_flags(sneaking: bool, sprinting: bool, body: &BodyFlags) -> i8 {
         shared |= -128;
     }
     shared
+}
+
+/// The stack in equipment slot `index` (`equipment_cache::SLOTS`): held, offhand, armor head..feet.
+fn equipment_source(g: &Guest, index: usize) -> Option<&ItemStack> {
+    match index {
+        0 => g.inventory.get(g.selected)?.as_ref(),
+        1 => g.offhand.as_ref(),
+        _ => g.armor.get(index - 2)?.as_ref(),
+    }
 }
 
 #[cfg(test)]

@@ -946,7 +946,7 @@ impl Mesher<'_> {
         );
         let info = &self.tables.info;
         let catalog = &self.render.model_catalog;
-        let mut models = Vec::new();
+        let mut models = Vec::with_capacity(4);
         for y in 0..16 {
             for z in 0..16 {
                 for x in 0..16 {
@@ -1104,23 +1104,25 @@ impl Mesher<'_> {
         } else {
             &mut out.solid
         };
+        target.reserve(4);
+        let layer_flags = if face.opaque && !face.translucent || !self.cutout_leaves && state.leaves
+        {
+            face.layer as u16 | OPAQUE_LAYER
+        } else {
+            face.layer as u16
+        };
+        let tint_rgb = tint.map(|t| (t >> 16 & 255, t >> 8 & 255, t & 255));
         for i in 0..4 {
             let g = gray[i] as u32;
-            let rgb = match tint {
-                Some(t) => [16, 8, 0].map(|shift| g * (t >> shift & 255) / 255),
+            let rgb = match tint_rgb {
+                Some((tr, tg, tb)) => [g * tr / 255, g * tg / 255, g * tb / 255],
                 None => [g; 3],
             };
             let p = q.positions[i];
             target.push(TerrainVertex::new(
                 [p[0] + origin[0], p[1] + origin[1], p[2] + origin[2]],
                 q.uv[i],
-                // Opaque leaves (forceOpaque) and quads over opaque texels draw in the
-                // solid layer: no alpha cutout (a dirt path's side skips its clear top row).
-                if face.opaque && !face.translucent || !self.cutout_leaves && state.leaves {
-                    face.layer as u16 | OPAQUE_LAYER
-                } else {
-                    face.layer as u16
-                },
+                layer_flags,
                 emitting(pack_rgb(rgb), tier),
                 pack_coords(lighting::with_emission(coords[i], q.light_emission)),
             ));

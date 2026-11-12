@@ -5854,9 +5854,10 @@ impl Frustum {
     #[inline(always)]
     pub fn intersects(&self, min: Vec3, max: Vec3) -> bool {
         !self.planes.iter().any(|p| {
-            let mask = p.truncate().cmpge(Vec3::ZERO);
+            let n = p.truncate();
+            let mask = n.cmpge(Vec3::ZERO);
             let v = Vec3::select(mask, max, min);
-            p.truncate().dot(v) + p.w < 0.0
+            n.dot(v) + p.w < 0.0
         })
     }
     /// Whether the camera-relative box `min..max` is entirely inside. Then
@@ -5866,9 +5867,10 @@ impl Frustum {
     #[inline(always)]
     pub fn contains(&self, min: Vec3, max: Vec3) -> bool {
         self.planes.iter().all(|p| {
-            let mask = p.truncate().cmpge(Vec3::ZERO);
+            let n = p.truncate();
+            let mask = n.cmpge(Vec3::ZERO);
             let v = Vec3::select(mask, min, max);
-            p.truncate().dot(v) + p.w >= 0.0
+            n.dot(v) + p.w >= 0.0
         })
     }
 }

@@ -183,6 +183,8 @@ pub struct Guest {
     pub inventory: Vec<Option<ItemStack>>,
     pub armor: [Option<ItemStack>; 4],
     pub offhand: Option<ItemStack>,
+    /// The converted held, offhand and armor stacks, kept while they do not change.
+    pub equipment: super::equipment_cache::EquipmentCache,
     pub selected: usize,
     pub carried: Option<ItemStack>,
     /// The inventory menu's crafting grid (2x2) and its result
@@ -342,6 +344,7 @@ impl Guest {
             inventory: vec![None; 36],
             armor: [None, None, None, None],
             offhand: None,
+            equipment: Default::default(),
             selected: 0,
             carried: None,
             craft_grid: Default::default(),
