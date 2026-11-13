@@ -61,10 +61,19 @@ jobs:
       - name: Compute Build Metadata
         shell: bash
         run: |
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          DATE_TAG=$(date -u +%Y.%m.%d-%H%M)
-          echo "HORIZON_LAUNCHER_TAG=v${DATE_TAG}-${SHORT_SHA}" >> $GITHUB_ENV
-          echo "HORIZON_LAUNCHER_VERSION=${DATE_TAG}" >> $GITHUB_ENV
+          # Must match the tag chosen in "Publish Release" exactly (derived from the commit, not the clock),
+          # otherwise the installed launcher never equals the latest release and keeps offering the update.
+          if [ -n "${{ github.event.inputs.tag_name }}" ]; then
+            TAG_NAME="${{ github.event.inputs.tag_name }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG_NAME="${{ github.ref_name }}"
+          else
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            DATE_TAG=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d-%H%M HEAD)
+            TAG_NAME="v${DATE_TAG}-${SHORT_SHA}"
+          fi
+          echo "HORIZON_LAUNCHER_TAG=${TAG_NAME}" >> $GITHUB_ENV
+          echo "HORIZON_LAUNCHER_VERSION=${TAG_NAME#v}" >> $GITHUB_ENV
 
       - name: Build Launcher
         run: cargo build --profile dist --manifest-path launcher/Cargo.toml --target ${{ matrix.target }}
@@ -173,7 +182,7 @@ jobs:
             TAG_NAME="$REF_NAME"
           else
             SHORT_SHA=$(git rev-parse --short HEAD)
-            DATE_TAG=$(date -u +%Y.%m.%d-%H%M)
+            DATE_TAG=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d-%H%M HEAD)
             TAG_NAME="v${DATE_TAG}-${SHORT_SHA}"
           fi
 
