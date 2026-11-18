@@ -1,19 +1,17 @@
-//! Step 1, import: a Modrinth `.mrpack`, a CurseForge zip, an instance
-//! folder (Prism / MultiMC, or a plain `mods/` folder), or a Crash Assistant
-//! `modlist.json` (the list packs such as ATM10 publish) to `pack.json`.
+//! Step 1, import: a Modrinth `.mrpack`, a CurseForge zip, a Prism / MultiMC zip,
+//! an instance folder, or a Crash Assistant `modlist.json` to `pack.json`.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
     fs,
-    io::Read,
     path::{Path, PathBuf},
 };
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Pack {
     pub name: String,
-    /// `mrpack`, `curseforge` or `instance`.
+    /// `mrpack`, `curseforge`, `prism` or `instance`.
     pub format: String,
     pub minecraft: String,
     /// `neoforge`, `forge`, `fabric` or `quilt`.
@@ -57,7 +55,7 @@ pub struct PackFile {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    /// The jar on disk (instances only).
+    /// The jar on disk, from an instance or staged from a Prism archive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jar: Option<PathBuf>,
 }
@@ -80,6 +78,10 @@ const LOADERS: [(&str, &str); 4] = [
 ];
 
 pub fn import(path: &Path) -> Result<Pack, String> {
+    import_with_jars(path, None)
+}
+
+pub(crate) fn import_with_jars(path: &Path, work: Option<&Path>) -> Result<Pack, String> {
     if path.is_dir() {
         return instance(path);
     }
@@ -90,12 +92,12 @@ pub fn import(path: &Path) -> Result<Pack, String> {
         return modlist(&list);
     }
     let file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut zip = crate::zip_intake::open(file).map_err(|e| format!("{}: {e}", path.display()))?;
     if let Some(index) = read_json(&mut zip, "modrinth.index.json")? {
-        return Ok(mrpack(&index, &names(&zip)));
+        return Ok(mrpack(&index, &names(&zip)?));
     }
     if let Some(manifest) = read_json(&mut zip, "manifest.json")? {
-        let mut pack = curseforge(&manifest, &names(&zip));
+        let mut pack = curseforge(&manifest, &names(&zip)?);
         // The manifest names files only by CurseForge ids, which need a key
         // to resolve; the pack's own mod list names them and gives their
         // SHA-1s, so Modrinth can answer for most.
@@ -106,23 +108,149 @@ pub fn import(path: &Path) -> Result<Pack, String> {
         }
         return Ok(pack);
     }
+    let names = names(&zip)?;
+    if let Some((root, game)) = prism_archive_layout(&names)? {
+        return prism_archive(path, &mut zip, &names, root, &game, work);
+    }
     Err(format!(
-        "{}: neither modrinth.index.json nor manifest.json",
+        "{}: no Modrinth, CurseForge or Prism pack metadata",
         path.display()
     ))
 }
 
-fn names(zip: &zip::ZipArchive<fs::File>) -> Vec<String> {
-    zip.file_names().map(str::to_owned).collect()
-}
-
-fn read_json(zip: &mut zip::ZipArchive<fs::File>, name: &str) -> Result<Option<Value>, String> {
-    let Ok(mut entry) = zip.by_name(name) else {
+/// The archive prefix of the instance and its game directory. Prism exports may
+/// put the instance at the archive root or inside one named directory.
+pub fn prism_archive_layout<S: AsRef<str>>(names: &[S]) -> Result<Option<(&str, String)>, String> {
+    let mut roots = names.iter().filter_map(|name| {
+        let root = name.as_ref().strip_suffix("mmc-pack.json")?;
+        if root.is_empty() {
+            return Some(root);
+        }
+        let folder = root.strip_suffix('/')?;
+        (!folder.is_empty() && !folder.contains('/')).then_some(root)
+    });
+    let Some(root) = roots.next() else {
         return Ok(None);
     };
-    let mut text = String::new();
-    entry
-        .read_to_string(&mut text)
+    if roots.next().is_some() {
+        return Err("the archive contains more than one Prism instance".into());
+    }
+    if !root.is_empty() {
+        crate::resourcepacks::check_path(root.trim_end_matches('/'))?;
+    }
+    let game = [".minecraft/", "minecraft/", ""]
+        .into_iter()
+        .map(|folder| format!("{root}{folder}"))
+        .find(|prefix| {
+            names.iter().any(|name| {
+                name.as_ref().strip_prefix(prefix).is_some_and(|rest| {
+                    rest.starts_with("mods/") || rest.starts_with("resourcepacks/")
+                })
+            })
+        })
+        .unwrap_or_else(|| root.to_owned());
+    Ok(Some((root, game)))
+}
+
+fn prism_archive(
+    source: &Path,
+    zip: &mut crate::zip_intake::Archive<fs::File>,
+    names: &[String],
+    root: &str,
+    game: &str,
+    work: Option<&Path>,
+) -> Result<Pack, String> {
+    let mmc = read_json(zip, &format!("{root}mmc-pack.json"))?
+        .ok_or("Prism archive has no readable mmc-pack.json")?;
+    let name = if root.is_empty() {
+        source
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        root.trim_end_matches('/').to_owned()
+    };
+    let mut pack = Pack {
+        name,
+        format: "prism".into(),
+        ..Pack::default()
+    };
+    prism_components(&mut pack, &mmc);
+    if pack.minecraft.is_empty() {
+        return Err("mmc-pack.json does not name a Minecraft version".into());
+    }
+    if work.is_some() {
+        crate::resourcepacks::reject_duplicate_entries(zip)?;
+    }
+    let prefix = format!("{game}mods/");
+    let mut budget = crate::entry::Budget::archive();
+    for raw in names {
+        let Some(name) = raw
+            .strip_prefix(&prefix)
+            .filter(|name| name.ends_with(".jar") && !name.contains('/'))
+        else {
+            continue;
+        };
+        crate::resourcepacks::check_path(name)?;
+        let mut file = PackFile {
+            path: format!("mods/{name}"),
+            ..PackFile::default()
+        };
+        if let Some(work) = work {
+            let entry = zip.by_name(raw).map_err(|e| format!("{raw}: {e}"))?;
+            if entry
+                .unix_mode()
+                .is_some_and(|mode| !matches!(mode & 0o170000, 0 | 0o100000))
+            {
+                return Err(format!("{raw}: expected a regular mod jar"));
+            }
+            let size = entry.size();
+            let bytes = budget
+                .read(entry, size, crate::fetch::MAX_JAR)
+                .map_err(|e| format!("{raw}: {e}"))?;
+            let sha1 = sha1_hex(&bytes);
+            // A reimport can reuse identical jars without overwriting a different pack version.
+            let folder = work.join("jars").join(&sha1);
+            crate::resourcepacks::directory(work, &folder)?;
+            let dest = folder.join(name);
+            crate::fetch::store_download(bytes.as_slice(), Some(&sha1), &dest, true)
+                .map_err(|e| format!("{}: {e}", dest.display()))?;
+            file.sha1 = Some(sha1);
+            file.jar = Some(dest);
+        }
+        pack.files.push(file);
+    }
+    pack.files.sort_by(|a, b| a.path.cmp(&b.path));
+    for top in ["config", "kubejs", "defaultconfigs", "datapacks"] {
+        let prefix = format!("{game}{top}/");
+        let count = names
+            .iter()
+            .filter(|name| name.starts_with(&prefix) && !name.ends_with('/'))
+            .count();
+        if count > 0 {
+            pack.overrides.insert(top.into(), count);
+        }
+    }
+    Ok(pack)
+}
+
+fn names(zip: &crate::zip_intake::Archive<fs::File>) -> Result<Vec<String>, String> {
+    zip.file_names()
+        .map(|name| name.map(|name| name.into_owned()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())
+}
+
+fn read_json(
+    zip: &mut crate::zip_intake::Archive<fs::File>,
+    name: &str,
+) -> Result<Option<Value>, String> {
+    let Ok(entry) = zip.by_name(name) else {
+        return Ok(None);
+    };
+    let declared = entry.size();
+    let text = crate::entry::read_text(entry, declared, crate::entry::MAX_TEXT)
         .map_err(|e| format!("{name}: {e}"))?;
     serde_json::from_str(text.trim_start_matches('\u{feff}'))
         .map(Some)
@@ -271,6 +399,24 @@ pub fn modlist(list: &Value) -> Result<Pack, String> {
     Ok(pack)
 }
 
+fn prism_components(pack: &mut Pack, mmc: &Value) {
+    for c in mmc["components"].as_array().into_iter().flatten() {
+        let version = str_of(c, "version");
+        match c["uid"].as_str().unwrap_or("") {
+            "net.minecraft" => pack.minecraft = version,
+            "net.neoforged" => (pack.loader, pack.loader_version) = ("neoforge".into(), version),
+            "net.minecraftforge" => (pack.loader, pack.loader_version) = ("forge".into(), version),
+            "net.fabricmc.fabric-loader" => {
+                (pack.loader, pack.loader_version) = ("fabric".into(), version)
+            }
+            "org.quiltmc.quilt-loader" => {
+                (pack.loader, pack.loader_version) = ("quilt".into(), version)
+            }
+            _ => {}
+        }
+    }
+}
+
 /// A Prism / MultiMC instance (`mmc-pack.json`), a game folder, or a
 /// folder of jars: the jars on disk, hashed.
 fn instance(dir: &Path) -> Result<Pack, String> {
@@ -284,32 +430,16 @@ fn instance(dir: &Path) -> Result<Pack, String> {
     };
     if let Ok(text) = fs::read_to_string(dir.join("mmc-pack.json")) {
         let mmc: Value = serde_json::from_str(&text).map_err(|e| format!("mmc-pack.json: {e}"))?;
-        for c in mmc["components"].as_array().into_iter().flatten() {
-            let version = str_of(c, "version");
-            match c["uid"].as_str().unwrap_or("") {
-                "net.minecraft" => pack.minecraft = version,
-                "net.neoforged" => {
-                    (pack.loader, pack.loader_version) = ("neoforge".into(), version)
-                }
-                "net.minecraftforge" => {
-                    (pack.loader, pack.loader_version) = ("forge".into(), version)
-                }
-                "net.fabricmc.fabric-loader" => {
-                    (pack.loader, pack.loader_version) = ("fabric".into(), version)
-                }
-                "org.quiltmc.quilt-loader" => {
-                    (pack.loader, pack.loader_version) = ("quilt".into(), version)
-                }
-                _ => {}
-            }
-        }
+        prism_components(&mut pack, &mmc);
     }
-    let game = [".minecraft", "minecraft", "."]
-        .iter()
-        .map(|g| dir.join(g))
-        .find(|g| g.join("mods").is_dir())
-        .or_else(|| dir.read_dir().is_ok().then(|| dir.to_path_buf()))
-        .ok_or_else(|| format!("{}: no mods folder", dir.display()))?;
+    // A CurseForge app instance has no `mmc-pack.json`; fill only when that
+    // file gave no Minecraft version, so Prism behaviour is unchanged.
+    if pack.minecraft.is_empty()
+        && let Some((minecraft, loader, loader_version)) = curseforge_instance_target(dir)
+    {
+        (pack.minecraft, pack.loader, pack.loader_version) = (minecraft, loader, loader_version);
+    }
+    let game = game_dir(dir)?;
     let mods = if game.join("mods").is_dir() {
         game.join("mods")
     } else {
@@ -343,6 +473,51 @@ fn instance(dir: &Path) -> Result<Pack, String> {
     Ok(pack)
 }
 
+/// The Minecraft version, loader and loader version a CurseForge app
+/// instance records, or `None` when it has neither file or they are
+/// unreadable. `minecraftinstance.json` is the app's record of what the
+/// instance runs and wins over `manifest.json`, the pack author's copy,
+/// which goes stale when the player changes the game version or loader in the
+/// app (and which a custom profile never has). The triple comes from one
+/// file, never mixed.
+pub fn curseforge_instance_target(dir: &Path) -> Option<(String, String, String)> {
+    let read = |name: &str| -> Option<Value> {
+        let text = fs::read_to_string(dir.join(name)).ok()?;
+        serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()
+    };
+    let from_instance = read("minecraftinstance.json").map(|v| {
+        let minecraft = str_of(&v, "gameVersion");
+        let id = str_of(&v["baseModLoader"], "name");
+        let (loader, version) = id.split_once('-').unwrap_or((&id, ""));
+        // Fabric and Quilt ids end in the Minecraft version
+        // (`fabric-0.16.14-1.21.5`); it is not part of the loader's own.
+        let version = version
+            .strip_suffix(minecraft.as_str())
+            .and_then(|v| v.strip_suffix('-'))
+            .unwrap_or(version);
+        (minecraft, loader.to_owned(), version.to_owned())
+    });
+    let from_manifest = || {
+        read("manifest.json").map(|m| {
+            let pack = curseforge(&m, &[]);
+            (pack.minecraft, pack.loader, pack.loader_version)
+        })
+    };
+    from_instance
+        .filter(|(minecraft, ..)| !minecraft.is_empty())
+        .or_else(|| from_manifest().filter(|(minecraft, ..)| !minecraft.is_empty()))
+}
+
+/// Resolve the game root for both mod and resource-pack instance imports.
+pub(crate) fn game_dir(dir: &Path) -> Result<PathBuf, String> {
+    [".minecraft", "minecraft", "."]
+        .iter()
+        .map(|g| dir.join(g))
+        .find(|g| g.join("mods").is_dir() || g.join("resourcepacks").is_dir())
+        .or_else(|| dir.read_dir().is_ok().then(|| dir.to_path_buf()))
+        .ok_or_else(|| format!("{}: no game folder", dir.display()))
+}
+
 fn count_files(dir: &Path) -> usize {
     let Ok(entries) = fs::read_dir(dir) else {
         return 0;
@@ -368,6 +543,135 @@ pub fn sha1_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn prism_zip_feeds_the_native_port_inventory() {
+        use std::io::{Cursor, Write};
+        use zip::{ZipWriter, write::SimpleFileOptions};
+
+        let root = instance_with("prism-zip", &[]);
+        let archive = root.join("pack.zip");
+        let mut jar = ZipWriter::new(Cursor::new(Vec::new()));
+        jar.start_file("mcmod.info", SimpleFileOptions::default())
+            .unwrap();
+        jar.write_all(br#"[{"modid":"example","version":"1.0"}]"#)
+            .unwrap();
+        let jar = jar.finish().unwrap().into_inner();
+        let mut zip = ZipWriter::new(fs::File::create(&archive).unwrap());
+        let metadata = json!({"components": [
+            {"uid": "net.minecraft", "version": "1.7.10"},
+            {"uid": "net.minecraftforge", "version": "10.13.4.1614"}
+        ]});
+        for (path, bytes) in [
+            (
+                "Example Pack/mmc-pack.json",
+                metadata.to_string().as_bytes(),
+            ),
+            ("Example Pack/.minecraft/mods/example.jar", jar.as_slice()),
+            (
+                "Example Pack/.minecraft/config/example/settings.cfg",
+                b"settings",
+            ),
+            (
+                "Example Pack/.minecraft/resourcepacks/Example/pack.mcmeta",
+                b"{}",
+            ),
+            ("Example Pack/libraries/loader.jar", b"not a mod"),
+        ] {
+            zip.start_file(path, SimpleFileOptions::default()).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap();
+
+        let work = root.join("work");
+        let log = &|_| {};
+        let preview = import(&archive).unwrap();
+        assert_eq!(preview.name, "Example Pack");
+        assert!(preview.files[0].jar.is_none());
+        let pack = crate::pipeline::import(&archive, &work, log).unwrap();
+        assert_eq!(pack.minecraft, "1.7.10");
+        assert_eq!(pack.loader, "forge");
+        assert_eq!(pack.loader_version, "10.13.4.1614");
+        assert_eq!(pack.overrides, BTreeMap::from([("config".into(), 1)]));
+        assert_eq!(pack.files.len(), 1);
+        assert_eq!(pack.files[0].path, "mods/example.jar");
+        assert_eq!(pack.files[0].sha1.as_deref(), Some(sha1_hex(&jar).as_str()));
+        assert_eq!(fs::read(pack.files[0].jar.as_ref().unwrap()).unwrap(), jar);
+        let rows = crate::pipeline::inventory(&work, true, log).unwrap();
+        assert_eq!(rows[0].key, "example");
+        assert!(work.join("resourcepacks/Example/pack.mcmeta").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prism_zip_refuses_unsafe_mod_basenames_before_staging() {
+        use std::io::{Cursor, Write};
+        use zip::{ZipWriter, write::SimpleFileOptions};
+
+        for (tag, name) in [
+            ("backslash", "nested\\example.jar"),
+            ("drive-colon", "C:example.jar"),
+            ("dot-components", "..\\example.jar"),
+        ] {
+            let root = instance_with(&format!("prism-zip-{tag}"), &[]);
+            let archive = root.join("pack.zip");
+            let mut jar = ZipWriter::new(Cursor::new(Vec::new()));
+            jar.start_file("mcmod.info", SimpleFileOptions::default())
+                .unwrap();
+            jar.write_all(br#"[{"modid":"example","version":"1.0"}]"#)
+                .unwrap();
+            let jar = jar.finish().unwrap().into_inner();
+            let mut zip = ZipWriter::new(fs::File::create(&archive).unwrap());
+            let metadata = json!({"components": [
+                {"uid": "net.minecraft", "version": "1.7.10"},
+                {"uid": "net.minecraftforge", "version": "10.13.4.1614"}
+            ]});
+            let mod_path = format!("Example Pack/.minecraft/mods/{name}");
+            for (path, bytes) in [
+                (
+                    "Example Pack/mmc-pack.json",
+                    metadata.to_string().as_bytes(),
+                ),
+                (mod_path.as_str(), jar.as_slice()),
+            ] {
+                zip.start_file(path, SimpleFileOptions::default()).unwrap();
+                zip.write_all(bytes).unwrap();
+            }
+            zip.finish().unwrap();
+
+            let original = fs::read(&archive).unwrap();
+            let work = root.join("work");
+            let error = crate::pipeline::import(&archive, &work, &|_| {}).unwrap_err();
+            assert!(
+                error.contains("unsafe resource-pack path"),
+                "{tag}: {error}"
+            );
+            assert_eq!(count_files(&work), 0, "{tag}: staged a file");
+            // Outside work only the archive and the fixture's own empty mods folder exist, both
+            // unchanged by the refusal.
+            let fixture_mods = root.join("mods");
+            assert_eq!(count_files(&fixture_mods), 0, "{tag}: wrote into mods");
+            for entry in fs::read_dir(&root).unwrap() {
+                let path = entry.unwrap().path();
+                assert!(
+                    path == archive || path == work || path == fixture_mods,
+                    "{tag}: {path:?}"
+                );
+            }
+            assert_eq!(fs::read(&archive).unwrap(), original, "{tag}");
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn prism_archive_layout_rejects_ambiguous_or_unsafe_roots() {
+        assert!(prism_archive_layout(&["a/mmc-pack.json", "b/mmc-pack.json"]).is_err());
+        assert!(prism_archive_layout(&["../mmc-pack.json"]).is_err());
+        assert_eq!(
+            prism_archive_layout(&["mmc-pack.json", "minecraft/mods/example.jar"]).unwrap(),
+            Some(("", "minecraft/".into())),
+        );
+    }
 
     #[test]
     fn reads_an_mrpack_index() {
@@ -440,6 +744,171 @@ mod tests {
         );
         assert_eq!(p.files[0].curseforge, Some((238222, 5101366)));
         assert_eq!(p.overrides["kubejs"], 1);
+    }
+
+    /// An instance folder holding the given files and an empty `mods/`.
+    fn instance_with(tag: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("horizon-cf-inst-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("mods")).unwrap();
+        for (name, text) in files {
+            fs::write(dir.join(name), text).unwrap();
+        }
+        dir
+    }
+
+    fn target(pack: &Pack) -> (&str, &str, &str) {
+        (&pack.minecraft, &pack.loader, &pack.loader_version)
+    }
+
+    #[test]
+    fn a_curseforge_instance_names_its_version_and_loader() {
+        let neo = instance_with(
+            "neo",
+            &[(
+                "minecraftinstance.json",
+                r#"{"gameVersion": "1.21.1", "baseModLoader": {"name": "neoforge-21.1.133"}}"#,
+            )],
+        );
+        // Fabric's id ends in the Minecraft version, which is not the loader's.
+        let fabric = instance_with(
+            "fabric",
+            &[(
+                "minecraftinstance.json",
+                r#"{"gameVersion": "1.21.5", "baseModLoader": {"name": "fabric-0.16.14-1.21.5"}}"#,
+            )],
+        );
+        // Only a manifest, with a byte order mark.
+        let manifest = instance_with(
+            "manifest",
+            &[(
+                "manifest.json",
+                "\u{feff}{\"minecraft\": {\"version\": \"1.20.1\", \"modLoaders\": [{\"id\": \"forge-47.2.0\", \"primary\": true}]}}",
+            )],
+        );
+        assert_eq!(
+            target(&import(&neo).unwrap()),
+            ("1.21.1", "neoforge", "21.1.133")
+        );
+        assert_eq!(
+            target(&import(&fabric).unwrap()),
+            ("1.21.5", "fabric", "0.16.14")
+        );
+        assert_eq!(
+            target(&import(&manifest).unwrap()),
+            ("1.20.1", "forge", "47.2.0")
+        );
+        for dir in [neo, fabric, manifest] {
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn loader_ids_without_a_minecraft_suffix_or_loader_are_kept_whole() {
+        let cases = [
+            (
+                "1.21.5",
+                r#"{"name": "fabric-0.16.14"}"#,
+                ("1.21.5", "fabric", "0.16.14"),
+            ),
+            (
+                "1.21.5",
+                r#"{"name": "quilt-0.26.0-1.21.5"}"#,
+                ("1.21.5", "quilt", "0.26.0"),
+            ),
+            ("1.21.5", "null", ("1.21.5", "", "")),
+        ];
+        for (i, (game, loader, expected)) in cases.into_iter().enumerate() {
+            let dir = instance_with(
+                &format!("edge{i}"),
+                &[(
+                    "minecraftinstance.json",
+                    &format!(r#"{{"gameVersion": "{game}", "baseModLoader": {loader}}}"#),
+                )],
+            );
+            assert_eq!(target(&import(&dir).unwrap()), expected);
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn minecraftinstance_wins_over_a_stale_manifest() {
+        let dir = instance_with(
+            "both",
+            &[
+                (
+                    "manifest.json",
+                    r#"{"minecraft": {"version": "1.20.1", "modLoaders": [{"id": "forge-47.2.0"}]}}"#,
+                ),
+                (
+                    "minecraftinstance.json",
+                    r#"{"gameVersion": "1.21.1", "baseModLoader": {"name": "neoforge-21.1.133"}}"#,
+                ),
+            ],
+        );
+        assert_eq!(
+            target(&import(&dir).unwrap()),
+            ("1.21.1", "neoforge", "21.1.133")
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn broken_curseforge_files_leave_the_import_working() {
+        // A broken minecraftinstance.json falls back to the manifest; a
+        // broken manifest too leaves the target empty but the jars imported.
+        let fallback = instance_with(
+            "fallback",
+            &[
+                ("minecraftinstance.json", "{not json"),
+                (
+                    "manifest.json",
+                    r#"{"minecraft": {"version": "1.21.1", "modLoaders": [{"id": "neoforge-21.1.133"}]}}"#,
+                ),
+            ],
+        );
+        let broken = instance_with(
+            "broken",
+            &[
+                ("minecraftinstance.json", "{not json"),
+                ("manifest.json", ""),
+            ],
+        );
+        fs::write(broken.join("mods/a.jar"), b"jar").unwrap();
+        assert_eq!(
+            target(&import(&fallback).unwrap()),
+            ("1.21.1", "neoforge", "21.1.133")
+        );
+        let pack = import(&broken).unwrap();
+        assert_eq!(target(&pack), ("", "", ""));
+        assert_eq!(pack.files.len(), 1);
+        for dir in [fallback, broken] {
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn mmc_pack_still_wins_over_curseforge_files() {
+        let dir = instance_with(
+            "mmc",
+            &[
+                (
+                    "mmc-pack.json",
+                    r#"{"components": [{"uid": "net.minecraft", "version": "1.20.4"},
+                        {"uid": "net.fabricmc.fabric-loader", "version": "0.15.0"}]}"#,
+                ),
+                (
+                    "minecraftinstance.json",
+                    r#"{"gameVersion": "1.21.1", "baseModLoader": {"name": "neoforge-21.1.133"}}"#,
+                ),
+            ],
+        );
+        assert_eq!(
+            target(&import(&dir).unwrap()),
+            ("1.20.4", "fabric", "0.15.0")
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

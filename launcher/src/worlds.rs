@@ -2,7 +2,7 @@
 //! up, copying and deleting them. Backups are made as vanilla's Make Backup makes them
 //! (`LevelStorageAccess.makeWorldBackup`): `backups/<yyyy-MM-dd_HH-mm-ss>_<folder>.zip` in the
 //! game folder, every file under `<folder>/` but the world's `session.lock`.
-use horizon_world::nbt::{self, Limits, Tag};
+use horizon_platform::world::nbt::{self, Limits, Tag};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -10,6 +10,28 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The lock a running game holds on a world; vanilla's backups leave it out.
 const LOCK: &str = "session.lock";
+
+struct WorldLock(fs::File);
+
+impl Drop for WorldLock {
+    fn drop(&mut self) {
+        // A concurrent process spawn can inherit the file before exec closes it.
+        // Release the lock explicitly rather than waiting for every handle to close.
+        let _ = self.0.unlock();
+    }
+}
+
+/// Hold the same exclusive lock as the game until a filesystem operation finishes.
+fn lock_world(world: &World) -> Result<WorldLock, String> {
+    let lock = fs::File::options()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(world.path.join(LOCK))
+        .map_err(|e| e.to_string())?;
+    lock.try_lock().map_err(|e| e.to_string())?;
+    Ok(WorldLock(lock))
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct World {
@@ -28,6 +50,24 @@ pub struct World {
     pub size: u64,
     /// `icon.png`, the picture the game took of it.
     pub icon: Option<PathBuf>,
+    /// The ids of the mods it was last saved with: the code mods of `fml.LoadingModList`, then the
+    /// content mods of Horizon's `horizon.ContentModList`, as the game writes them.
+    pub mods: Vec<String>,
+}
+
+/// The worlds of `worlds` saved with any of the mods `ids`, each with those of its mods.
+pub fn saved_with<'a>(worlds: &'a [World], ids: &[String]) -> Vec<(&'a World, Vec<String>)> {
+    worlds
+        .iter()
+        .filter_map(|world| {
+            let used: Vec<String> = ids
+                .iter()
+                .filter(|id| world.mods.contains(id))
+                .cloned()
+                .collect();
+            (!used.is_empty()).then_some((world, used))
+        })
+        .collect()
 }
 
 /// The worlds in a game folder's `saves/`, the last played first.
@@ -88,6 +128,27 @@ fn read(path: &Path) -> Option<World> {
         _ => changed,
     };
     let icon = path.join("icon.png");
+    // `[{ModId, ModVersion}]` lists, as `save::level_mods` writes them; anything else reads as none.
+    let listed = |list: Option<&Tag>| -> Vec<String> {
+        let Some(Tag::List(entries)) = list else {
+            return Vec::new();
+        };
+        entries
+            .iter()
+            .filter_map(|entry| text(entry.get("ModId")))
+            .filter(|id| !id.is_empty())
+            .collect()
+    };
+    let mut mods = listed(
+        root.as_ref()
+            .and_then(|r| r.get("fml"))
+            .and_then(|fml| fml.get("LoadingModList")),
+    );
+    mods.extend(listed(
+        root.as_ref()
+            .and_then(|r| r.get("horizon"))
+            .and_then(|horizon| horizon.get("ContentModList")),
+    ));
     Some(World {
         name: text(field("LevelName"))
             .filter(|n| !n.trim().is_empty())
@@ -99,6 +160,7 @@ fn read(path: &Path) -> Option<World> {
         version: text(field("Version").and_then(|v| v.get("Name"))),
         size: size(path),
         icon: icon.is_file().then_some(icon),
+        mods,
     })
 }
 
@@ -158,6 +220,7 @@ fn backup_at(
     world: &World,
     now: chrono::DateTime<chrono::Local>,
 ) -> Result<PathBuf, String> {
+    let _lock = lock_world(world)?;
     let dir = home.join("backups");
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let prefix = format!("{}_{}", now.format("%Y-%m-%d_%H-%M-%S"), world.folder);
@@ -201,6 +264,7 @@ fn backup_at(
 /// Copies the world into a new folder of the same `saves/`, named "<name> (1)", "<name> (2)"...
 /// and gives the copy that name in its level.dat so the game's list tells them apart.
 pub fn copy(world: &World) -> Result<World, String> {
+    let _lock = lock_world(world)?;
     let saves = world.path.parent().ok_or("A world folder has a parent")?;
     let folder = free_name(saves, &world.name, "", 1);
     let to = saves.join(&folder);
@@ -251,6 +315,13 @@ fn rename_level(world: &Path, name: &str) -> std::io::Result<()> {
 
 /// Moves the world to the system's trash, where the player can still get it back.
 pub fn delete(world: &World) -> Result<(), String> {
+    let lock = lock_world(world)?;
+    // Match server deletion: Windows cannot move the folder with this handle open.
+    // If the game opens it after the probe, its handle prevents the move instead.
+    #[cfg(windows)]
+    drop(lock);
+    #[cfg(not(windows))]
+    let _lock = lock;
     crate::desktop_seams::to_trash(&world.path)
         .map_err(|e| format!("Could not move {} to the trash: {e}", world.name))
 }

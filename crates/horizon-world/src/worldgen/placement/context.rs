@@ -40,8 +40,9 @@ pub trait PlacementContext {
         Ok(())
     }
     /// Block.updateFromNeighbourShapes for the state at `position`, written
-    /// with `flags` when it changes. Worlds without block shape-update
-    /// behavior accept this as a no-op.
+    /// with `flags` when it changes, then LevelAccessor.updateNeighborsAt for
+    /// the new block (a no-op outside a live level). Worlds without block
+    /// shape-update behavior accept this as a no-op.
     fn update_from_neighbour_shapes(
         &mut self,
         _position: [i32; 3],
@@ -329,7 +330,7 @@ pub trait PlacementContext {
     }
     /// Add an entity from its NBT (structure templates and pieces; `Pos` is
     /// absolute). Worlds without entity storage drop it.
-    fn add_entity(&mut self, _nbt: crate::nbt::Compound) -> Result<(), PlacementQueryError> {
+    fn add_entity(&mut self, _nbt: horizon_core::nbt::Compound) -> Result<(), PlacementQueryError> {
         Ok(())
     }
     /// Store block-entity data loaded at a just-placed block (structure
@@ -337,7 +338,7 @@ pub trait PlacementContext {
     fn set_block_entity(
         &mut self,
         _position: [i32; 3],
-        _nbt: crate::nbt::Compound,
+        _nbt: horizon_core::nbt::Compound,
     ) -> Result<(), PlacementQueryError> {
         Ok(())
     }

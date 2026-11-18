@@ -1,5 +1,5 @@
 //! Enchantments on the gear mobs wear and hold (`Mob.populateDefaultEquipmentEnchantments`,
-//! raid buffs): the side table kept beside the plain item ids in `Extra`,
+//! raid buffs): the side table kept beside the stacks in `Extra::equipment`,
 //! its saved form, and the combat numbers the enchantments give (Sharpness,
 //! Smite, Bane of Arthropods, Fire Aspect, Knockback, Power, Punch, Flame,
 //! Quick Charge and the protections).
@@ -18,11 +18,11 @@ pub const ARMOR: [usize; 4] = [HEAD, CHEST, LEGS, FEET];
 pub const KEYS: [&str; 6] = ["mainhand", "offhand", "head", "chest", "legs", "feet"];
 
 pub type Levels = Vec<(Arc<str>, u32)>;
-/// An armour trim: (`trim_material`, `trim_pattern`) ids.
-pub type Trim = (Arc<str>, Arc<str>);
+/// The same named/direct armor-trim holders as the full item stack.
+pub type Trim = crate::item_data::Trim;
 
 /// The enchantments and trims of each equipment slot.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Gear {
     pub slots: [Levels; 6],
     /// The `minecraft:trim` of each slot's item (a loot table's set_components).
@@ -102,6 +102,8 @@ fn undead(s: Species) -> bool {
             | Species::Zoglin
             | Species::SkeletonHorse
             | Species::ZombieHorse
+            | Species::CamelHusk
+            | Species::ZombieNautilus
     )
 }
 fn arthropod(s: Species) -> bool {
@@ -128,6 +130,27 @@ pub fn damage_bonus(levels: &[(Arc<str>, u32)], target: Option<Species>) -> f32 
     }
     bonus
 }
+/// `Mob.doHurtTarget`'s `getAttributeValue(ATTACK_DAMAGE)`: the mob's own
+/// value plus the `attack_damage` modifiers of the stack in its main hand
+/// (an iron axe adds 8, a sword 4 to 7, a trident 8) — the stack's own
+/// `attribute_modifiers`, components included, or its item's, as
+/// `item_attribute_modifier` leaves them (arismoko/horizon#941). Vanilla applies them to the
+/// attribute map when the item is equipped; the live map reads the same rows.
+pub fn attack_damage(m: &Mob, items: Option<&crate::items::Items>) -> f32 {
+    let base = f64::from(m.attrs.attack_damage);
+    let Some(items) = items else {
+        return base as f32;
+    };
+    let Some(stack) = m.extra.slot_stack(horizon_items::equipment::MAINHAND) else {
+        return base as f32;
+    };
+    super::equip::attribute_with(
+        &crate::item_attributes::attribute_modifiers(stack, items),
+        "minecraft:attack_damage",
+        base,
+        super::equip::Slot::MainHand,
+    ) as f32
+}
 /// The extra damage of the mob's held weapon against a target species.
 pub fn melee_bonus(m: &Mob, target: Option<Species>) -> f32 {
     gear(m).map_or(0.0, |g| damage_bonus(&g.slots[MAIN], target))
@@ -147,8 +170,6 @@ pub struct ArrowBonus {
     pub damage: f32,
     /// Punch: knockback levels.
     pub punch: u32,
-    /// Flame: sets the target on fire.
-    pub flame: bool,
     /// Piercing: entities an arrow passes through.
     pub pierce: u32,
 }
@@ -161,7 +182,6 @@ pub fn arrow_bonus(m: &Mob) -> ArrowBonus {
             0.0
         },
         punch: level(m, MAIN, "minecraft:punch"),
-        flame: level(m, MAIN, "minecraft:flame") > 0,
         pierce: level(m, MAIN, "minecraft:piercing"),
     }
 }
@@ -173,24 +193,18 @@ pub fn protection(m: &Mob, kind: DamageKind) -> f32 {
     protection_points(g, kind).min(20.0)
 }
 pub fn protection_points(g: &Gear, kind: DamageKind) -> f32 {
-    // Protection's `damage_protection` skips #bypasses_invulnerability.
-    if kind == DamageKind::Generic || kind.bypasses_invulnerability() {
+    // getDamageAfterMagicAbsorb returns before enchantments for #bypasses_effects;
+    // Protection itself skips #bypasses_invulnerability. Plain generic is protected.
+    if kind.bypasses_invulnerability() || kind.bypasses_effects() {
         return 0.0;
     }
-    let fire = matches!(
-        kind,
-        DamageKind::OnFire
-            | DamageKind::InFire
-            | DamageKind::Campfire
-            | DamageKind::HotFloor
-            | DamageKind::Lava
-            | DamageKind::Fireball
-            | DamageKind::SulfurCubeHot
-    );
-    let projectile = matches!(
-        kind,
-        DamageKind::Arrow | DamageKind::Thrown | DamageKind::Fireball | DamageKind::WindCharge
-    );
+    let source = super::Damage::of(kind);
+    let fire = source.is_fire();
+    let projectile = source.is_projectile();
+    let explosion = matches!(kind, DamageKind::Explosion | DamageKind::Fireworks)
+        || matches!(kind, DamageKind::Named(n) if n.has(super::NamedDamage::IS_EXPLOSION));
+    let fall = matches!(kind, DamageKind::Fall | DamageKind::Stalagmite)
+        || matches!(kind, DamageKind::Named(n) if n.has(super::NamedDamage::IS_FALL));
     let mut total = 0.0;
     for slot in ARMOR {
         for (id, l) in &g.slots[slot] {
@@ -198,17 +212,9 @@ pub fn protection_points(g: &Gear, kind: DamageKind) -> f32 {
             total += match &**id {
                 "minecraft:protection" => l,
                 "minecraft:fire_protection" if fire => 2.0 * l,
-                "minecraft:blast_protection"
-                    if matches!(kind, DamageKind::Explosion | DamageKind::Fireworks) =>
-                {
-                    2.0 * l
-                }
+                "minecraft:blast_protection" if explosion => 2.0 * l,
                 "minecraft:projectile_protection" if projectile => 2.0 * l,
-                "minecraft:feather_falling"
-                    if matches!(kind, DamageKind::Fall | DamageKind::Stalagmite) =>
-                {
-                    3.0 * l
-                }
+                "minecraft:feather_falling" if fall => 3.0 * l,
                 _ => 0.0,
             };
         }
@@ -234,6 +240,9 @@ mod tests {
         assert_eq!(damage_bonus(&l, Some(Species::Zombie)), 5.0);
         assert_eq!(damage_bonus(&l, Some(Species::Spider)), 2.5);
         assert_eq!(damage_bonus(&l, None), 0.0);
+        for s in [Species::CamelHusk, Species::ZombieNautilus] {
+            assert_eq!(damage_bonus(&l, Some(s)), 5.0);
+        }
     }
     #[test]
     fn protections_count_by_damage_kind() {
@@ -244,7 +253,9 @@ mod tests {
         assert_eq!(protection_points(&g, DamageKind::MobAttack), 4.0);
         assert_eq!(protection_points(&g, DamageKind::Fall), 16.0);
         assert_eq!(protection_points(&g, DamageKind::OnFire), 8.0);
-        assert_eq!(protection_points(&g, DamageKind::Generic), 0.0);
+        assert_eq!(protection_points(&g, DamageKind::Generic), 4.0);
+        assert_eq!(protection_points(&g, DamageKind::GenericKill), 0.0);
+        assert_eq!(protection_points(&g, DamageKind::OutOfWorld), 0.0);
     }
     #[test]
     fn upgrading_keeps_the_higher_level() {

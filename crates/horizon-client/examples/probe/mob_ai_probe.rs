@@ -12,6 +12,7 @@ use horizon_client::{
     collisions,
     containers::{BlockEntity, CreakingHeart},
     items::{ItemStack, Items},
+    join_seq::JoinList,
     light::{LightTables, apply_lighting, light_chunk},
     mobs::{
         Damage, MobType, creaking,
@@ -25,7 +26,7 @@ use horizon_client::{
 };
 use horizon_core::{
     geometry::{Aabb, Vec3},
-    random::LegacyRandom,
+    random::{LegacyRandom, RandomSource},
 };
 use horizon_world::loot::PackOverlay;
 use horizon_world::{chunk::BlockState, registry::BlockRegistry, registry::BlockStateId};
@@ -59,6 +60,8 @@ struct Scenario {
     creative: bool,
     /// The tick from which the player faces another yaw.
     turn: Option<(i32, f32)>,
+    /// The player rides a boat that moves this far each tick (x, z).
+    boat: Option<[f64; 2]>,
     /// Creaking hearts placed when the scenario starts.
     hearts: Vec<Vec<String>>,
     /// `ServerLevel.isSpawningMonsters`.
@@ -132,6 +135,9 @@ fn parse(text: &str) -> Vec<Scenario> {
                         s.turn = Some((tick.parse().unwrap(), yaw.parse().unwrap()));
                     } else if let Some(item) = opt.strip_prefix("hand=") {
                         s.hand = Some(item.to_owned());
+                    } else if let Some(v) = opt.strip_prefix("boat=") {
+                        let (x, z) = v.split_once(',').unwrap();
+                        s.boat = Some([x.parse().unwrap(), z.parse().unwrap()]);
                     } else {
                         panic!("unknown player option {opt}");
                     }
@@ -174,7 +180,7 @@ fn state(registry: &BlockRegistry, text: &str) -> BlockStateId {
     registry
         .resolve(&BlockState {
             name: name.to_owned(),
-            properties,
+            properties: properties.into(),
         })
         .unwrap_or_else(|e| panic!("{text}: {e}"))
 }
@@ -199,7 +205,9 @@ fn goal_name(m: &Mob, name: &str) -> String {
         "Float" => "FloatGoal",
         "RandomFloatAround" => "RandomFloatAroundGoal",
         "GhastLook" => "GhastLookGoal",
+        "Peek" => "ShulkerPeekGoal",
         "GhastShoot" => "GhastShootFireballGoal",
+        "BlazeAttack" => "BlazeAttackGoal",
         "Stroll" => "WaterAvoidingRandomStrollGoal",
         "ParrotWander" => "ParrotWanderGoal",
         "RandomStroll" => "RandomStrollGoal",
@@ -215,6 +223,7 @@ fn goal_name(m: &Mob, name: &str) -> String {
         "RandomSwimming" => "RandomSwimmingGoal",
         "LookAtPlayer" => "LookAtPlayerGoal",
         "RandomLookAround" => "RandomLookAroundGoal",
+        "SpearUse" => "SpearUseGoal",
         "HurtByTarget" => "HurtByTargetGoal",
         "NearestTarget" => "NearestAttackableTargetGoal",
         "Panic" => "PanicGoal",
@@ -229,7 +238,7 @@ fn goal_name(m: &Mob, name: &str) -> String {
         "RestrictSun" => "RestrictSunGoal",
         "FleeSun" => "FleeSunGoal",
         // `Cat.CatAvoidEntityGoal`, `Fox.FoxAvoidEntityGoal`... name their subclass.
-        "AvoidEntity" if m.species() == Species::Cat => "CatAvoidEntityGoal",
+        "AvoidEntity" | "CatAvoid" if m.species() == Species::Cat => "CatAvoidEntityGoal",
         "AvoidEntity" => "AvoidEntityGoal",
         "BowAttack" => "RangedBowAttackGoal",
         "Swell" => "SwellGoal",
@@ -277,13 +286,10 @@ fn villager_flag(m: &mut Mob, flag: &str) {
         .unwrap_or_else(|| panic!("unknown mob flag {flag}"));
     match k {
         "profession" => {
-            let p = horizon_client::mobs::render::PROFESSIONS
-                .iter()
-                .position(|p| *p == v)
-                .expect("profession");
-            villager::set_profession(m, p as u8);
+            let p = villager::profession_index(v).expect("profession");
+            villager::set_profession(m, villager::profession_table(), usize::from(p));
         }
-        "level" => m.extra.variant3 = v.parse().unwrap(),
+        "level" => m.extra.villager_level = v.parse().unwrap(),
         "xp" => {
             m.extra.trade.get_or_insert_with(Default::default).xp = v.parse().unwrap();
         }
@@ -326,13 +332,13 @@ fn spawn_seed(index: usize) -> i64 {
 /// draws from the level's random and joins the scenario's mobs next tick,
 /// seeded as the oracle seeds what a tick spawned.
 fn summon_golem(
-    mobs: &mut [Mob],
+    mobs: &mut JoinList<Mob>,
     a: usize,
     needed: usize,
     w: &MobWorld,
     types: &MobTypes,
     born: &mut Vec<Mob>,
-    level_random: &mut LegacyRandom,
+    level_random: &mut impl RandomSource,
 ) {
     use horizon_client::mobs::{villager, villager_brain};
     let Some(near) = villager::golem_summoners(mobs, a, w.game_time, needed) else {
@@ -356,7 +362,7 @@ fn summon_golem(
     let Some(mut golem) = golem else {
         return;
     };
-    golem.random = LegacyRandom::new(spawn_seed(index));
+    golem.random.set_seed(spawn_seed(index));
     born.push(golem);
     for j in near {
         villager_brain::golem_detected(&mut mobs[j], w.game_time);
@@ -366,7 +372,7 @@ fn summon_golem(
 /// Villager events that act at once in vanilla (`TradeWithVillager` and
 /// `VillagerMakeLove` write the other villager directly).
 fn villager_events(
-    mobs: &mut [Mob],
+    mobs: &mut JoinList<Mob>,
     events: &mut Vec<MobEvent>,
     from: usize,
     w: &MobWorld,
@@ -374,7 +380,7 @@ fn villager_events(
     items: &Items,
     born: &mut Vec<Mob>,
     day_time: i64,
-    level_random: &mut LegacyRandom,
+    level_random: &mut impl RandomSource,
 ) {
     use horizon_client::mobs::villager;
     let index = |mobs: &[Mob], id: u32| {
@@ -387,9 +393,7 @@ fn villager_events(
             MobEvent::VillagerMeet { mob, other } => {
                 events.remove(i);
                 if let (Some(a), Some(b)) = (index(mobs, mob), index(mobs, other)) {
-                    let meeting = villager::meet(mobs, a, b, w.game_time, |item| {
-                        items.get(item).map_or(64, |i| i.max_stack)
-                    });
+                    let meeting = villager::meet(mobs, a, b, w.game_time, items, w.professions);
                     assert!(
                         meeting.thrown.is_empty(),
                         "villagers toss items: not modelled here"
@@ -414,7 +418,7 @@ fn villager_events(
                 let (Some(a), Some(b)) = (index(mobs, parent), index(mobs, partner)) else {
                     continue;
                 };
-                villager::ext_mut(&mut mobs[b]).eat_and_digest();
+                villager::ext_mut(&mut mobs[b]).eat_and_digest(items);
                 let Some((bed, variant)) = child else {
                     continue;
                 };
@@ -426,11 +430,11 @@ fn villager_events(
                 child.persistent = true;
                 // The flat world is all plains (type 0).
                 child.extra.variant = variant.unwrap_or(0);
-                child.extra.variant2 = villager::NONE;
+                child.extra.profession = Default::default();
                 child.extra.age = -24000;
                 child.extra.bed = Some(bed);
                 let seed = spawn_seed(index);
-                child.random = LegacyRandom::new(seed);
+                child.random.set_seed(seed);
                 horizon_client::mobs::villager_brain::init(&mut child, w.game_time, day_time, seed);
                 born.push(child);
             }
@@ -442,14 +446,14 @@ fn villager_events(
 /// The player's UUID (the oracle's `PLAYER_UUID`).
 const PLAYER_UUID: [i32; 4] = [0, 0x1234, 0, 0x5678];
 
-fn seen(m: &Mob) -> Seen {
-    m.seen(Some(PLAYER_UUID))
+fn seen(m: &Mob, items: &Items) -> Seen {
+    m.seen(Some(PLAYER_UUID), items)
 }
 
 /// The probe's mobs as a creaking heart sees them: creakings it creates take
 /// the n-th seed from 1000, as the oracle's do.
 struct Host<'a> {
-    mobs: &'a mut Vec<Mob>,
+    mobs: &'a mut JoinList<Mob>,
     added: Vec<Mob>,
     types: &'a MobTypes,
     created: &'a mut i64,
@@ -486,7 +490,7 @@ impl HeartHost for Host<'_> {
         let seed = 1000 + *self.created;
         *self.created += 1;
         let mut m = Mob::new(200_000 + seed as u32, kind, at, 0.0);
-        m.random = LegacyRandom::new(seed);
+        m.random.set_seed(seed);
         horizon_client::mobs::monster_brain::init(&mut m, seed);
         m
     }
@@ -522,14 +526,18 @@ impl HiveHost for ProbeHive<'_, '_> {
     fn set_honey_level(&mut self, at: [i32; 3], level: i32) {
         self.honey.push((at, level));
     }
-    fn load(&mut self, tag: &horizon_world::nbt::Tag) -> Option<Mob> {
+    fn load(&mut self, tag: &horizon_core::nbt::Tag) -> Option<Mob> {
         let index = self.first + self.added.len();
-        let mut m =
-            horizon_client::entity_nbt::mob_from_nbt(tag, self.types, 100_000 + index as u32)?;
+        let mut m = horizon_client::entity_nbt::mob_from_nbt(
+            tag,
+            self.types,
+            100_000 + index as u32,
+            None,
+        )?;
         if m.species() != Species::Bee {
             return None;
         }
-        m.random = LegacyRandom::new(spawn_seed(index));
+        m.random.set_seed(spawn_seed(index));
         horizon_client::mobs::bee::draw_cooldowns(&mut m);
         Some(m)
     }
@@ -540,6 +548,7 @@ impl HiveHost for ProbeHive<'_, '_> {
     fn sound(&mut self, name: &'static str, at: [f64; 3]) {
         self.events.push(MobEvent::Sound(name, at, 1.0, 1.0));
     }
+    fn set_changed(&mut self, _at: [i32; 3]) {}
 }
 /// The hive's honey level and front from its block state.
 fn hive_state(registry: &BlockRegistry, world: &World, at: [i32; 3]) -> (Option<i32>, [i32; 2]) {
@@ -594,8 +603,19 @@ fn print_heart(
 fn player_damage(e: &MobEvent) -> f32 {
     match e {
         MobEvent::AttackPlayer(amount, _)
+        | MobEvent::CubeHurtPlayer { amount, .. }
+        | MobEvent::Sting {
+            target: Who::Player,
+            amount,
+            ..
+        }
         | MobEvent::AttackPlayerWithEffect { amount, .. }
-        | MobEvent::DamagePlayer { amount, .. } => *amount,
+        | MobEvent::DamagePlayer { amount, .. }
+        | MobEvent::IronGolemHit {
+            target: Who::Player,
+            amount,
+            ..
+        } => *amount,
         MobEvent::SonicBoom {
             target: Who::Player,
             ..
@@ -611,14 +631,25 @@ fn player_hurt(player: Option<&PlayerView>, e: &MobEvent) -> bool {
     };
     match e {
         MobEvent::AttackPlayer(amount, _)
+        | MobEvent::CubeHurtPlayer { amount, .. }
+        | MobEvent::Sting {
+            target: Who::Player,
+            amount,
+            ..
+        }
         | MobEvent::AttackPlayerWithEffect { amount, .. }
-        | MobEvent::DamagePlayer { amount, .. } => *amount > 0.0,
+        | MobEvent::DamagePlayer { amount, .. }
+        | MobEvent::IronGolemHit {
+            target: Who::Player,
+            amount,
+            ..
+        } => *amount > 0.0,
         MobEvent::SonicBoom {
             target: Who::Player,
             ..
         } => true,
         // ServerExplosion.hurtEntities: within twice the radius every hit does damage.
-        MobEvent::Explode(at, radius, _) => {
+        MobEvent::Explode(at, radius, _, _) => {
             let d = Vec3::new(at[0], at[1], at[2])
                 .distance_squared(p.position)
                 .sqrt();
@@ -740,6 +771,9 @@ fn print(out: &mut String, t: i32, i: usize, m: &Mob, player_down: bool, now: i6
     if let Some((acts, mem)) = brain {
         let _ = write!(out, "\tact {acts}\tmem {mem}");
     }
+    if horizon_client::mobs::finalize::ageable(m.species()) {
+        let _ = write!(out, "\tage {}", m.extra.age);
+    }
     if m.species() == Species::Villager {
         let _ = write!(out, "\tvx {}", villager(m));
     }
@@ -824,8 +858,8 @@ fn villager(m: &Mob) -> String {
     };
     let mut s = format!(
         "prof {} lvl {} xp {} food {} age {} inv {} gossip {} rep {} sleep {}",
-        horizon_client::mobs::render::PROFESSIONS[m.extra.variant2 as usize % 15],
-        m.extra.variant3.max(1),
+        villager::profession(m.extra.profession.index().unwrap_or(0)).id,
+        m.extra.villager_level.max(1),
         villager::xp(m),
         e.map_or(0, |e| e.food_level),
         m.extra.age,
@@ -871,7 +905,10 @@ pub fn main() -> horizon_client::Result<()> {
     let registry = assets.registry;
     let facts = BlockFacts::load(root, registry)?;
     let motion = horizon_client::motion::MotionResources::load(root, &assets)?;
-    let data = MobData::load(root, &facts);
+    let data = MobData::load(
+        &horizon_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
+        &facts,
+    );
     let types = MobTypes::load(root)?;
     // The types a bee leaving its hive is loaded with (EntityType.loadEntityRecursive).
     let arc_types: HashMap<String, Arc<MobType>> = types
@@ -879,10 +916,15 @@ pub fn main() -> horizon_client::Result<()> {
         .iter()
         .map(|(k, v)| (k.clone(), Arc::new(v.clone())))
         .collect();
-    let biomes = Biomes::load(root)?;
-    let items = Items::load(root, registry, &facts, &PackOverlay::NONE)?;
+    let biomes = Biomes::load(&horizon_assets::resource_source::ResourceRoot::directory(
+        root.to_path_buf(),
+    ))?;
+    let defaults = horizon_world::item_defaults::read(root)?;
+    let items = Items::load(root, registry, &facts, &PackOverlay::NONE, &defaults)?;
     let tables = LightTables::load(root, registry, &facts)?;
-    let collision = collisions::load(root, registry)?;
+    let collision = std::sync::Arc::new(collisions::load(root, registry)?);
+    let suffocation =
+        horizon_client::mobs::suffocation::bind(collision.clone(), &motion.causes_suffocation)?;
     let air = registry.default_state("minecraft:air").ok_or("no air")?;
     let layers = [
         state(registry, "minecraft:bedrock"),
@@ -986,7 +1028,7 @@ pub fn main() -> horizon_client::Result<()> {
         }
         world.day_time = s.time;
         world.game_time = 1000;
-        let mut mobs: Vec<Mob> = Vec::new();
+        let mut mobs = JoinList::<Mob>::default();
         for (i, spec) in s.mobs.iter().enumerate() {
             let kind = types
                 .types
@@ -999,7 +1041,8 @@ pub fn main() -> horizon_client::Result<()> {
                 spec.yaw,
             );
             if spec.baby {
-                m.extra.age = -24000;
+                // AgeableMob.setBaby: the species' getBabyStartAge (a sniffer's is -48000).
+                m.extra.age = horizon_client::mobs::finalize::baby_start_age(m.species());
             }
             for flag in &spec.flags {
                 match flag.as_str() {
@@ -1009,10 +1052,11 @@ pub fn main() -> horizon_client::Result<()> {
                         m.persistent = true;
                     }
                     "ridden" => {
-                        m.extra.head = Some("minecraft:red_harness".into());
+                        m.extra.set_body(Some("minecraft:red_harness".into()));
                         m.rider = Some(horizon_client::mobs::equine::Rider::default());
                     }
                     "noai" => m.no_ai = true,
+                    "agelocked" => m.extra.age_locked = true,
                     // Warden.finalizeSpawn's own part.
                     "digcooldown" | "emerge" => horizon_client::mobs::warden::finalize(
                         &mut m,
@@ -1022,6 +1066,10 @@ pub fn main() -> horizon_client::Result<()> {
                     "inlove" => m.extra.in_love = 600,
                     "nectar" => horizon_client::mobs::bee::set_has_nectar(&mut m, true),
                     "tame" => m.extra.tame = true,
+                    "owned" => {
+                        horizon_client::mobs::tame::set_tame(&mut m, true);
+                        m.extra.owner = Some(PLAYER_UUID);
+                    }
                     x if x.starts_with("age=") => m.extra.age = x[4..].parse().unwrap(),
                     x if x.starts_with("strength=") => m.extra.variant2 = x[9..].parse().unwrap(),
                     x if x.starts_with("hand=") => {
@@ -1033,6 +1081,13 @@ pub fn main() -> horizon_client::Result<()> {
                     // Set once the brain exists (below).
                     x if x.starts_with("cooldown=") => {}
                     "dead" => m.health = 0.0,
+                    // effect=<name>:<amplifier>, never running out.
+                    x if x.starts_with("effect=") => {
+                        let (name, amp) = x[7..].split_once(':').unwrap();
+                        let name: &'static str =
+                            Box::leak(format!("minecraft:{name}").into_boxed_str());
+                        m.add_effect(name, -1, amp.parse().unwrap());
+                    }
                     "leashed" => m.extra.leash = Some(horizon_client::mobs::leash::Holder::Player),
                     x if x.starts_with("leashto=") => {
                         let n: u32 = x[8..].parse().unwrap();
@@ -1041,7 +1096,16 @@ pub fn main() -> horizon_client::Result<()> {
                     other => villager_flag(&mut m, other),
                 }
             }
-            m.random = LegacyRandom::new(spec.seed);
+            m.random.set_seed(spec.seed);
+            if matches!(
+                m.species(),
+                Species::Cod | Species::Salmon | Species::TropicalFish
+            ) {
+                // The oracle draws FollowFlockLeaderGoal's first delay again once seeded.
+                let delay =
+                    horizon_client::mobs::aquatic::FollowFlockLeader::next_start_tick(&mut m);
+                m.ai.goals.set_start_delay("FollowFlockLeaderGoal", delay);
+            }
             if m.species() == Species::Bee {
                 // The oracle draws the constructor's cooldowns again once seeded.
                 horizon_client::mobs::bee::draw_cooldowns(&mut m);
@@ -1090,6 +1154,7 @@ pub fn main() -> horizon_client::Result<()> {
                 ),
                 eye: [p[0], p[1] + f64::from(1.62_f32), p[2]],
                 alive: true,
+                invulnerable: false,
                 creative: s.creative,
                 sneaking: false,
                 swimming: false,
@@ -1097,6 +1162,9 @@ pub fn main() -> horizon_client::Result<()> {
                 main_hand: s.hand.as_deref().map(Into::into),
                 off_hand: None,
                 head: None,
+                chest: None,
+                legs: None,
+                feet: None,
                 armor_cover: 0.0,
                 invisible: false,
                 spectator: false,
@@ -1115,10 +1183,13 @@ pub fn main() -> horizon_client::Result<()> {
                 sleeping: false,
                 sleep_timer: 0,
                 passenger: false,
+                riding_vehicle: None,
+                vehicle: None,
             }
         });
-        let mut scratch = LegacyRandom::new(0);
-        // The level's random for eating sounds: only goats and sniffers draw
+        // The level's random (`Level.random`), which mobs and their hits draw from.
+        let mut test_level = horizon_client::health::TestLevel::new(0);
+        // The level random for eating sounds: only goats and sniffers draw
         // from it, and the scenarios feed neither.
         let mut level_random = LegacyRandom::new(0);
         for (i, m) in mobs.iter().enumerate() {
@@ -1133,38 +1204,65 @@ pub fn main() -> horizon_client::Result<()> {
             };
             ($snapshot:expr, $grid:expr) => {
                 MobWorld {
+                    mob_maps: horizon_client::neoforge_mob_maps::NeoForgeMobMaps::vanilla(),
+                    goal_host: None,
                     teams: Default::default(),
+                    professions: horizon_client::mobs::villager::profession_table(),
+                    loop_context: crate::test_resources::server_loop_context(),
                     world: &world,
                     registry,
                     facts: &facts,
                     fluid_tables: &motion.fluids,
+                    attributes: &motion.attributes,
                     movement: &motion.blocks,
                     collision: &collision,
+                    suffocation: &suffocation,
                     data: &data,
                     player: player.clone(),
+                    // The probe lends no goal view: no identity to capture.
+                    player_identity: None,
+                    player_selection: None,
+                    controlling_player_movement: None,
                     nearest_player: player.as_ref().filter(|p| !p.spectator).map(|p| p.position),
                     others: $snapshot,
+                    live_mobs: None,
+                    dragon: None,
+                    leash_boats: &[],
+                    who_lookup: None,
+                    foreign: None,
                     others_grid: $grid,
                     others_index: None,
+                    passenger_objects: &[],
+                    others_villagers: None,
+                    others_solid: None,
                     daylight: (world.day_time.rem_euclid(24000)) < 12000,
                     monsters_burn: !(12542..23460).contains(&world.day_time.rem_euclid(24000)),
                     game_time: world.game_time,
                     day_time: world.day_time,
                     raining: s.rain,
                     thundering: s.thunder,
-                    nether: false,
+                    level: horizon_core::LevelKey::OVERWORLD,
                     block_tags: &items.block_tags,
+                    landing: &motion.landing,
                     biomes: &biomes,
                     mob_griefing: true,
+                    universal_anger: false,
                     mob_drops: true,
                     max_entity_cramming: 24,
                     difficulty: LocalDifficulty::new(s.difficulty, world.day_time, 0, 0.0),
-                    end: false,
+                    dimension_type: horizon_world::dimension_type::DimensionFacts::overworld(),
                     world_seed: 0,
                     // FlatLevelSource.getSeaLevel.
                     sea_level: -63,
                     items: Some(&items),
                     lid_openers: &lid_openers,
+                    mod_effects: None,
+                    mob_hooks: None,
+                    asks_animal_tame: false,
+                    asks_living_destroy_block: false,
+                    asks_baby_spawn: false,
+                    border: None,
+                    section_writer: None,
                 }
             };
         }
@@ -1182,6 +1280,30 @@ pub fn main() -> horizon_client::Result<()> {
                     BlockEntity::CreakingHeart(Box::new(h.clone())),
                 );
             }
+            if let (Some(p), Some([vx, vz]), Some(start)) = (player.as_mut(), s.boat, s.player) {
+                // The boat the player rides, moved by the script (the oracle's does not tick).
+                let at = [
+                    start[0] + vx * f64::from(t),
+                    start[1],
+                    start[2] + vz * f64::from(t),
+                ];
+                p.position = Vec3::new(at[0], at[1], at[2]);
+                p.bounds = Aabb::new(
+                    Vec3::new(at[0] - 0.3, at[1], at[2] - 0.3),
+                    Vec3::new(at[0] + 0.3, at[1] + 1.8, at[2] + 0.3),
+                );
+                p.eye = [at[0], at[1] + f64::from(1.62_f32), at[2]];
+                p.passenger = true;
+                p.riding = true;
+                p.vehicle = Some(horizon_client::mobs::Vehicle {
+                    nautilus: false,
+                    bounds: Aabb::new(
+                        Vec3::new(at[0] - 0.6875, at[1], at[2] - 0.6875),
+                        Vec3::new(at[0] + 0.6875, at[1] + 0.5625, at[2] + 0.6875),
+                    ),
+                    velocity: Vec3::new(vx, 0.0, vz),
+                });
+            }
             if let (Some(p), Some((tick, yaw))) = (player.as_mut(), s.turn)
                 && t >= tick
             {
@@ -1194,7 +1316,11 @@ pub fn main() -> horizon_client::Result<()> {
                 p.look = [f64::from(sin), -0.0, f64::from(cos)];
                 p.yaw = yaw;
             }
-            let mut snapshot: Vec<Seen> = mobs.iter().filter(|m| !m.removed).map(seen).collect();
+            let mut snapshot: Vec<Seen> = mobs
+                .iter()
+                .filter(|m| !m.removed)
+                .map(|m| seen(m, &items))
+                .collect();
             // The snapshot by position, kept as the game keeps it.
             let mut grid = SeenGrid::new(snapshot.iter().map(|e| e.bounds));
             let w = mob_world!(&snapshot);
@@ -1208,7 +1334,7 @@ pub fn main() -> horizon_client::Result<()> {
                 let at = player
                     .as_ref()
                     .map_or([0.0; 3], |p| [p.position.x, p.position.y, p.position.z]);
-                mobs[i].damage(1.0, Damage::player(at));
+                mobs[i].damage(&mut test_level.level(), 1.0, Damage::player(at));
                 // Creaking.hurtServer: the heart's reaction, then the sway.
                 if let Some((home, by_player)) = creaking::take_hurt(&mut mobs[i], &w) {
                     if by_player && let Some((_, h)) = hearts.iter_mut().find(|(at, _)| *at == home)
@@ -1224,7 +1350,7 @@ pub fn main() -> horizon_client::Result<()> {
                             h,
                             home,
                             &w,
-                            &mut scratch,
+                            test_level.random(),
                             &mut host,
                             &mut heart_events,
                         );
@@ -1261,7 +1387,7 @@ pub fn main() -> horizon_client::Result<()> {
                     continue;
                 }
                 if let Some(Some((name, volume, pitch))) =
-                    horizon_client::mobs::ai::feed_animal(&mut mobs[i], &mut level_random)
+                    horizon_client::mobs::ai::feed_animal(&mut mobs[i], &mut level_random, None)
                 {
                     events.push(MobEvent::Sound(name, [0.0; 3], volume, pitch));
                 }
@@ -1280,7 +1406,7 @@ pub fn main() -> horizon_client::Result<()> {
                 let from = events.len();
                 #[cfg(feature = "rng-trace")]
                 horizon_core::random::trace::set(true);
-                let alive = m.tick(&w, &mut scratch, &mut events);
+                let alive = m.tick(&w, &mut test_level.level(), &mut events);
                 #[cfg(feature = "rng-trace")]
                 {
                     horizon_core::random::trace::set(false);
@@ -1302,7 +1428,12 @@ pub fn main() -> horizon_client::Result<()> {
                         dropped_leads += 1;
                     }
                 }
-                horizon_client::mobs::apply_brain_events(&mut mobs, &mut events, from);
+                horizon_client::mobs::apply_brain_events(
+                    &mut mobs,
+                    &mut test_level.level(),
+                    &mut events,
+                    from,
+                );
                 villager_events(
                     &mut mobs,
                     &mut events,
@@ -1312,21 +1443,35 @@ pub fn main() -> horizon_client::Result<()> {
                     &items,
                     &mut born,
                     s.time,
-                    &mut scratch,
+                    test_level.random(),
                 );
                 horizon_client::mobs::warden::hear_mob_events(&mut mobs, &events, from, &w);
                 // Melee hits on other mobs land during the attacker's tick
                 // (LivingEntity.hurtServer), with the sounds they raise.
                 let mut k = from;
                 while k < events.len() {
-                    if let MobEvent::AttackMob {
-                        target,
-                        amount,
-                        source,
-                    } = events[k]
+                    let (hit, toss) = match events[k] {
+                        MobEvent::AttackMob {
+                            target,
+                            amount,
+                            source,
+                        } => (Some((target, amount, source)), false),
+                        // IronGolem.doHurtTarget: thrown up only if the hit landed.
+                        MobEvent::IronGolemHit {
+                            target: Who::Mob(target),
+                            amount,
+                            source,
+                        } => (Some((target, amount, source)), true),
+                        _ => (None, false),
+                    };
+                    if let Some((target, amount, source)) = hit
                         && let Some(t) = mobs.iter_mut().find(|m| m.id == target)
-                        && t.damage(amount, source)
+                        && t.damage(&mut test_level.level(), amount, source)
                     {
+                        if toss {
+                            t.velocity.y +=
+                                f64::from(0.4f32) * (1.0 - t.knockback_resistance()).max(0.0);
+                        }
                         let raised = std::mem::take(&mut t.outbox);
                         let n = raised.len();
                         events.splice(k + 1..k + 1, raised);
@@ -1334,10 +1479,40 @@ pub fn main() -> horizon_client::Result<()> {
                     }
                     k += 1;
                 }
+                // `Bee.doHurtTarget`: the game applies the stinger, the poison
+                // and the sound only when the sting landed (the scenario's
+                // player is hurtable every tick); a refused one gives the bee
+                // its stinger and its anger back.
+                let mut k = from;
+                while k < events.len() {
+                    let attacker = match &events[k] {
+                        MobEvent::Sting {
+                            target: Who::Player,
+                            source,
+                            ..
+                        } => match source.attacker {
+                            Some(Who::Mob(id)) => Some(id),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(id) = attacker
+                        && let Some(b) = mobs.iter_mut().find(|m| m.id == id)
+                    {
+                        if !player_hurt(player.as_ref(), &events[k]) {
+                            horizon_client::mobs::bee::sting_refused(b);
+                        } else if horizon_client::mobs::bee::sting_landed(b) {
+                            let at = [b.position.x, b.position.y, b.position.z];
+                            events.insert(k + 1, MobEvent::Sound("entity.bee.sting", at, 1.0, 1.0));
+                            k += 1;
+                        }
+                    }
+                    k += 1;
+                }
                 // What a copper golem did to chests, before the next mob ticks.
                 for e in &events[from.min(events.len())..] {
                     match e {
-                        MobEvent::ChestOpen { chest, open } => {
+                        MobEvent::ChestOpen { chest, open, .. } => {
                             let o = world
                                 .chest_openers
                                 .entry((chest[0], chest[1], chest[2]))
@@ -1378,14 +1553,20 @@ pub fn main() -> horizon_client::Result<()> {
                     else {
                         continue;
                     };
-                    let tag = horizon_client::entity_nbt::mob_to_nbt(&mobs[i], [0; 4], None);
+                    let tag = horizon_client::entity_nbt::mob_to_nbt(
+                        &mobs[i],
+                        [0; 4],
+                        None,
+                        None,
+                        |_| None,
+                    );
                     let flower = horizon_client::mobs::bee::get(&mobs[i]).and_then(|b| b.flower);
                     let mut honey = Vec::new();
                     let stored = {
                         let w = mob_world!(&snapshot);
                         let mut host = ProbeHive {
                             w: &w,
-                            random: &mut scratch,
+                            random: test_level.random(),
                             types: &arc_types,
                             first: 0,
                             added: &mut Vec::new(),
@@ -1402,7 +1583,7 @@ pub fn main() -> horizon_client::Result<()> {
                 // ServerLevel ticks entities one after another: the ones
                 // after this mob see it as it is now.
                 if let Some(k) = snapshot.iter().position(|e| e.id == mobs[i].id) {
-                    snapshot[k] = seen(&mobs[i]);
+                    snapshot[k] = seen(&mobs[i], &items);
                     snapshot[k].alive &= !mobs[i].removed;
                     grid.update(k, snapshot[k].bounds);
                 }
@@ -1428,7 +1609,14 @@ pub fn main() -> horizon_client::Result<()> {
                     created: &mut created,
                     spawning: s.spawning,
                 };
-                creaking_heart::server_tick(h, *at, &w, &mut scratch, &mut host, &mut heart_events);
+                creaking_heart::server_tick(
+                    h,
+                    *at,
+                    &w,
+                    test_level.random(),
+                    &mut host,
+                    &mut heart_events,
+                );
                 added.append(&mut host.added);
             }
             drop(w);
@@ -1451,7 +1639,7 @@ pub fn main() -> horizon_client::Result<()> {
                     let w = mob_world!(&snapshot);
                     let mut host = ProbeHive {
                         w: &w,
-                        random: &mut scratch,
+                        random: test_level.random(),
                         types: &arc_types,
                         first: mobs.len() + born.len(),
                         added: &mut added,
@@ -1478,6 +1666,24 @@ pub fn main() -> horizon_client::Result<()> {
                 })
                 .collect();
             for (at, open) in doors {
+                // DoorBlock.setOpen: the sound (a wooden door's), its pitch from the level's
+                // random, when the door was not already so.
+                let was = registry
+                    .state(world.block(at[0], at[1], at[2]))
+                    .is_some_and(|s| s.properties.get("open").map(String::as_str) == Some("true"));
+                if was != open {
+                    let pitch = test_level.random().next_float() * 0.1 + 0.9;
+                    events.push(MobEvent::Sound(
+                        if open {
+                            "block.wooden_door.open"
+                        } else {
+                            "block.wooden_door.close"
+                        },
+                        [0.0; 3],
+                        1.0,
+                        pitch,
+                    ));
+                }
                 let Some(half) = registry
                     .state(world.block(at[0], at[1], at[2]))
                     .and_then(|s| s.properties.get("half").cloned())
@@ -1494,8 +1700,8 @@ pub fn main() -> horizon_client::Result<()> {
                     }
                 }
             }
-            mobs.append(&mut born);
-            mobs.append(&mut added);
+            mobs.extend(born);
+            mobs.extend(added);
             for e in &heart_events {
                 match e {
                     HeartEvent::SetBlock(at, st) => world.set(at[0], at[1], at[2], *st)?,
@@ -1532,6 +1738,19 @@ pub fn main() -> horizon_client::Result<()> {
                         f(*volume),
                         f(*pitch)
                     );
+                } else if let MobEvent::BoundSound {
+                    sound,
+                    volume,
+                    pitch,
+                    ..
+                } = e
+                {
+                    let _ = writeln!(
+                        out,
+                        "{t} sound minecraft:{sound} {} {}",
+                        f(*volume),
+                        f(*pitch)
+                    );
                 } else if let MobEvent::SoundId(name, _, volume, pitch) = e {
                     let _ = writeln!(out, "{t} sound {name} {} {}", f(*volume), f(*pitch));
                 } else if player_hurt(player.as_ref(), e) {
@@ -1549,7 +1768,7 @@ pub fn main() -> horizon_client::Result<()> {
                 }
             }
             for (at, h) in &hearts {
-                print_heart(&mut out, t, registry, &world, *at, h, &scratch);
+                print_heart(&mut out, t, registry, &world, *at, h, test_level.random());
             }
             for b in s.blocks.iter().filter(|b| b[0] == "chest") {
                 let n = |i: usize| b[i].parse::<i32>().unwrap();

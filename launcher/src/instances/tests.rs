@@ -68,30 +68,61 @@ fn player_home(home: &Path) {
 }
 
 #[test]
-fn a_new_player_name_replaces_the_kept_one_everywhere() {
-    let root = scratch("newname");
-    let (home, data) = (root.join("horizon"), root.join("launcher"));
-    player_home(&home);
-    // An own instance that has the old name, and one with no file yet.
-    put(
-        &home.join("instances/one/horizon-player.txt"),
-        "name:Player123\n",
-    );
-    fs::create_dir_all(home.join("instances/two")).unwrap();
-    let name = new_player_name_in(&home, &data).unwrap();
-    assert_ne!(name, "Player123");
-    assert!(name.starts_with("Player") && name.len() == 11);
-    let kept = |home: &Path| fs::read_to_string(home.join("horizon-player.txt")).unwrap();
-    for h in [
-        &home,
-        &home.join("instances/one"),
-        &home.join("instances/two"),
-        &home.join("ports/small-pack/home"),
-        &home.join("horizon-packs/cozy/home"),
-    ] {
-        assert_eq!(kept(h), format!("name:{name}\n"), "{}", h.display());
+fn build_choices_start_balanced_and_are_remembered_per_instance() {
+    use crate::native_mods::Profile;
+    let root = scratch("native-build-choices");
+    let game = root.join("game");
+    let data = root.join("launcher");
+    for id in ["first", "second"] {
+        fs::create_dir_all(game.join("instances").join(id)).unwrap();
     }
-    let _ = fs::remove_dir_all(&root);
+    for instance in list_in(&game, &data) {
+        assert_eq!(instance.native_profile, Profile::Optimized);
+    }
+    let choose = |id, profile| {
+        edit_in(&game, &data, id, |meta| meta.native_profile = Some(profile)).unwrap()
+    };
+    choose("first", Profile::Optimized);
+    choose("second", Profile::Optimized);
+    let before = fs::read(data.join("instances.json")).unwrap();
+    for unknown in [serde_json::json!("future"), serde_json::json!(42)] {
+        let mut stored: serde_json::Value = serde_json::from_slice(&before).unwrap();
+        stored["instances"]["first"]["native_profile"] = unknown;
+        stored["instances"]["first"]["version"] = serde_json::json!("kept-version");
+        fs::write(
+            data.join("instances.json"),
+            serde_json::to_vec(&stored).unwrap(),
+        )
+        .unwrap();
+        edit_in(&game, &data, "second", |meta| {
+            meta.name = Some("Still here".into())
+        })
+        .unwrap();
+        let loaded = list_in(&game, &data);
+        assert_eq!(
+            find_in(&loaded, "first").unwrap().native_profile,
+            Profile::Optimized
+        );
+        assert_eq!(
+            find_in(&loaded, "first").unwrap().version.as_deref(),
+            Some("kept-version")
+        );
+        let neighbour = find_in(&loaded, "second").unwrap();
+        assert_eq!(neighbour.native_profile, Profile::Optimized);
+        assert_eq!(neighbour.name, "Still here");
+    }
+    fs::write(data.join("instances.json"), before).unwrap();
+    choose("second", Profile::Optimized);
+    let again = list_in(&game, &data);
+    assert_eq!(
+        find_in(&again, "first").unwrap().native_profile,
+        Profile::Optimized
+    );
+    assert_eq!(
+        find_in(&again, "second").unwrap().native_profile,
+        Profile::Optimized
+    );
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -155,13 +186,61 @@ fn existing_worlds_stay_where_they_are_and_every_folder_becomes_an_instance() {
     fs::remove_dir_all(&root).unwrap();
 }
 
+/// An imported pack is listed as an instance from its `pack.json` alone: neither its reports nor
+/// its carried mods are read, however many files they hold (#18074). The Modpacks page reads them
+/// whole, on a thread.
+#[test]
+fn imported_packs_are_listed_without_reading_their_mods() {
+    let root = scratch("listed-ports");
+    let (home, data) = (root.join("horizon"), root.join("launcher"));
+    player_home(&home);
+    let carry = home.join("ports/small-pack/mods/chipped/carry");
+    put(
+        &carry.join("horizon-mod.toml"),
+        "id = \"chipped\"
+",
+    );
+    for i in 0..50 {
+        put(
+            &carry.join(format!("assets/chipped/models/block/b{i}.json")),
+            "{}",
+        );
+    }
+    // Not a pack: no `pack.json`.
+    put(&home.join("ports/half-imported/coverage.json"), "[]");
+    let loads = || crate::modpacks::tests::LOADS.with(std::cell::Cell::get);
+
+    let before = loads();
+    let all = list_in(&home, &data);
+    let ports: Vec<_> = all.iter().filter(|i| i.kind == Kind::Port).collect();
+    assert_eq!(ports.len(), 1);
+    assert_eq!(ports[0].id, "port:small-pack");
+    assert_eq!(ports[0].name, "Small Pack");
+    assert_eq!(ports[0].home, home.join("ports/small-pack/home"));
+    assert_eq!(loads(), before, "listing the instances read a pack whole");
+
+    // The page's read does read it whole, and lists the same packs.
+    let read = crate::modpacks::list_in(&home.join("ports"));
+    assert!(loads() > before);
+    assert_eq!(read.len(), 1);
+    assert_eq!(read[0].slug, "small-pack");
+    fs::remove_dir_all(&root).unwrap();
+}
+
 #[test]
 fn names_stay_unique_and_packs_are_not_copied() {
     let root = scratch("names");
     let (home, data) = (root.join("horizon"), root.join("launcher"));
     player_home(&home);
     create_in(&home, &data, "Survival", None, None).unwrap();
-    assert!(create_in(&home, &data, "survival", None, None).is_err());
+    assert_eq!(
+        create_in(&home, &data, "survival", None, None).unwrap_err(),
+        "There is already an instance called survival. Choose another name."
+    );
+    assert_eq!(
+        name_taken_with_flag("survival"),
+        "There is already an instance called survival. Choose another name. (`--as NAME`)"
+    );
     assert!(create_in(&home, &data, "  ", None, None).is_err());
     // Another name with the same folder name gets the next free folder.
     let second = create_in(&home, &data, "Survival!", None, None).unwrap();
@@ -198,7 +277,7 @@ fn an_instance_follows_the_players_answers() {
     put(&main.join("options.txt"), "fov:90\n");
     put(&main.join("horizon-player.txt"), "name:Player123\n");
     put(&main.join("telemetry/consent.json"), r#"{"version":1}"#);
-    horizon_core::no_ai::set(&main, true).unwrap();
+    horizon_platform::no_ai::set(&main, true).unwrap();
     put(&own.join("options.txt"), "fov:70\n");
     follow_player(&main, &own);
     assert_eq!(
@@ -213,10 +292,10 @@ fn an_instance_follows_the_players_answers() {
         fs::read_to_string(own.join("telemetry/consent.json")).unwrap(),
         r#"{"version":1}"#
     );
-    assert!(horizon_core::no_ai::is_on(&own));
-    horizon_core::no_ai::set(&main, false).unwrap();
+    assert!(horizon_platform::no_ai::is_on(&own));
+    horizon_platform::no_ai::set(&main, false).unwrap();
     follow_player(&main, &own);
-    assert!(!horizon_core::no_ai::is_on(&own));
+    assert!(!horizon_platform::no_ai::is_on(&own));
     fs::remove_dir_all(&root).unwrap();
 }
 
@@ -395,4 +474,169 @@ fn the_mod_browser_installs_for_the_instance_loader() {
     );
     // A Quilt instance takes Fabric mods too.
     assert!(target.accepts("fabric") && !target.accepts("neoforge"));
+}
+
+/// A chosen picture is kept scaled to 128 pixels in the instance's folder; removing it moves it
+/// to the trash; a file that isn't an image is refused.
+#[test]
+fn a_picture_is_kept_small_and_goes_to_the_trash() {
+    let root = scratch("picture");
+    let (home, trash) = (root.join("home"), root.join("trash"));
+    let mut photo = Vec::new();
+    image::RgbaImage::from_pixel(600, 400, image::Rgba([200, 90, 40, 255]))
+        .write_to(
+            &mut std::io::Cursor::new(&mut photo),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+    let png = picture(photo).unwrap();
+    let to_trash = |p: &Path| crate::desktop_seams::to_folder(p, &trash);
+    set_picture(&home, Some(&png), &to_trash).unwrap();
+    let kept = image::open(home.join(PICTURE)).unwrap();
+    assert_eq!((kept.width(), kept.height()), (128, 85));
+    set_picture(&home, None, &to_trash).unwrap();
+    assert!(!home.join(PICTURE).exists());
+    assert!(trash.join(PICTURE).is_file());
+    // Nothing to remove is fine.
+    set_picture(&home, None, &to_trash).unwrap();
+    assert!(picture(b"not an image".to_vec()).is_err());
+    fs::remove_dir_all(&root).unwrap();
+}
+
+/// Edit switches what an instance plays (Horizon, Vanilla, a loader, another Minecraft version):
+/// its folder, with its worlds, mods and options, stays byte for byte as it was, a Java
+/// instance's settings come back after a turn as Horizon, and what can't keep working is named
+/// first. The game's home plays what it was made with.
+#[test]
+fn switching_what_an_instance_plays_keeps_its_worlds_mods_and_settings() {
+    use crate::loaders::{Kind as L, Loader};
+    let root = scratch("switch");
+    let (home, data) = (root.join("horizon"), root.join("launcher"));
+    player_home(&home);
+    let made = create_in(&home, &data, "Mine", None, None).unwrap();
+    put(&made.home.join("saves/Base/level.dat"), "base");
+    put(&made.home.join("saves/Base/region/r.0.0.mca"), "region");
+    put(
+        &made
+            .home
+            .join(crate::browser::java::MODS_DIR)
+            .join("minimap.hmod"),
+        "content hmod",
+    );
+    put(
+        &made
+            .home
+            .join(crate::native_mods::INSTALLED)
+            .join("treefall.hmod"),
+        "native hmod",
+    );
+    put(
+        &made
+            .home
+            .join(crate::native_mods::INSTALLED)
+            .join("obsolete.hnmod"),
+        "not a supported package",
+    );
+    put(&made.home.join("options.txt"), "fov:90");
+    edit_in(&home, &data, &made.id, |m| {
+        m.version = Some("nightly-2026-11-01-c9d474d".into())
+    })
+    .unwrap();
+    let before = files(&made.home);
+    let fabric = |v: &str| Plays::Java {
+        minecraft: v.into(),
+        loader: Some(Loader {
+            kind: L::Fabric,
+            version: "0.16.0".into(),
+        }),
+    };
+
+    // Horizon to Fabric: both kinds of Horizon mod stop loading; its world changes version.
+    let now = find_in(&list_in(&home, &data), &made.id).unwrap();
+    assert_eq!(
+        unkept(&now, &fabric("1.21.1"), "26.3"),
+        [
+            Unkept::Mods {
+                count: 2,
+                made_for: "Horizon".into()
+            },
+            Unkept::Worlds {
+                count: 1,
+                from: "26.3".into(),
+                to: "1.21.1".into()
+            },
+        ]
+    );
+    let java = switch::switch_in(&home, &data, &made.id, fabric("1.21.1")).unwrap();
+    assert_eq!(java.java.as_ref().unwrap().minecraft, "1.21.1");
+    assert_eq!(java.version.as_deref(), Some("nightly-2026-11-01-c9d474d"));
+    edit_in(&home, &data, &made.id, |m| {
+        m.java.as_mut().unwrap().memory_mb = Some(6144);
+        m.java.as_mut().unwrap().jvm_args = "-XX:+UseZGC".into();
+    })
+    .unwrap();
+    put(&made.home.join("mods/sodium.jar"), "jar");
+    let with_jar = files(&made.home);
+
+    // Fabric to Quilt keeps Fabric's mods working; another Minecraft version may not.
+    let quilt = Plays::Java {
+        minecraft: "1.21.1".into(),
+        loader: Some(Loader {
+            kind: L::Quilt,
+            version: "0.27.0".into(),
+        }),
+    };
+    let java = find_in(&list_in(&home, &data), &made.id).unwrap();
+    assert_eq!(unkept(&java, &quilt, "26.3"), []);
+    assert_eq!(
+        unkept(&java, &fabric("1.20.1"), "26.3")[0],
+        Unkept::ModsVersion {
+            count: 1,
+            from: "1.21.1".into(),
+            to: "1.20.1".into()
+        }
+    );
+
+    // A turn as Horizon, then Vanilla: the Java settings come back, nothing on disk moved.
+    switch::switch_in(&home, &data, &made.id, Plays::Horizon).unwrap();
+    let horizon = find_in(&list_in(&home, &data), &made.id).unwrap();
+    assert_eq!(horizon.java, None);
+    let vanilla = Plays::Java {
+        minecraft: "1.21.4".into(),
+        loader: None,
+    };
+    let back = switch::switch_in(&home, &data, &made.id, vanilla).unwrap();
+    let back = back.java.unwrap();
+    assert_eq!(
+        (
+            back.minecraft.as_str(),
+            back.memory_mb,
+            back.jvm_args.as_str()
+        ),
+        ("1.21.4", Some(6144), "-XX:+UseZGC")
+    );
+    assert_eq!(back.loader, None);
+    assert_eq!(files(&made.home), with_jar);
+    assert_eq!(
+        with_jar.len(),
+        before.len() + 1,
+        "only the jar put there is new"
+    );
+
+    // The game's home can't switch, and is left as it was.
+    let home_files = files(&home.join("saves"));
+    let refused = switch::switch_in(&home, &data, DEFAULT, Plays::Horizon).unwrap_err();
+    assert!(refused.contains("plays what it was made with"), "{refused}");
+    assert_eq!(files(&home.join("saves")), home_files);
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn an_instance_without_a_channel_is_nightly_and_an_unknown_one_too() {
+    let meta: Meta = serde_json::from_str("{}").unwrap();
+    assert_eq!(meta.channel.unwrap_or_default(), Channel::Nightly);
+    let meta: Meta = serde_json::from_str(r#"{"channel":"stable","group":"g"}"#).unwrap();
+    assert_eq!(meta.channel, Some(Channel::Stable));
+    let meta: Meta = serde_json::from_str(r#"{"channel":"beta","group":"g"}"#).unwrap();
+    assert_eq!((meta.channel, meta.group.as_deref()), (None, Some("g")));
 }

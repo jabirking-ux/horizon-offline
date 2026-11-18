@@ -8,11 +8,28 @@ from tools.ci import triage_command as tc
 ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 10, 28, 12, tzinfo=timezone.utc)
 URL = "https://github.com/horizon-rust/horizon/issues/5#issuecomment-1"
-LIST = ns.read_reviewers("kacpherek\nrdbtCVS\n")
+# Fixture accounts: the decision is by numeric ID, so each test login has one. Ludovic's real ID may not be filled in
+# yet (tools/ci/resolve_reviewer_ids.py), so tests use their own unless it is.
+LUDOVIC_ID = ns.OWNER_ID or 1
+ns.OWNER_ID = LUDOVIC_ID
+tc.ns.OWNER_ID = LUDOVIC_ID  # the script's own import of nightly_set
+IDS = {"ludovic111": LUDOVIC_ID, "kacpherek": 101, "rdbtcvs": 102, "levzzz5154": 104}
+
+
+def actor(login):
+    return ns.Actor(login, IDS.get(login.lower(), 9999))
+
+
+def listing(*lines):
+    """A reviewers file: `kacpherek` becomes `101 kacpherek`; other lines stay as written."""
+    return ns.read_reviewers("".join((f"{IDS[l.lower()]} {l}" if l.lower() in IDS else l) + "\n" for l in lines))
+
+
+LIST = listing("kacpherek", "rdbtCVS")
 
 
 def thread(state="open", user="dev", labels=("bug",), pr=False, merged=False, locked=False):
-    t = {"state": state, "user": {"login": user}, "labels": [{"name": n} for n in labels], "locked": locked}
+    t = {"state": state, "user": {"login": user, "id": IDS.get(user.lower(), 9999)}, "labels": [{"name": n} for n in labels], "locked": locked}
     if pr:
         t["pull_request"] = {"merged_at": "2026-10-27T00:00:00Z" if merged else None}
     return t
@@ -50,7 +67,7 @@ class Fake:
 
 def do(text, api=None, login="kacpherek", reviewers=LIST, n=5):
     api = api or Fake()
-    return tc.run(api, tc.parse(text), login, n, URL, reviewers, NOW), api
+    return tc.run(api, tc.parse(text), actor(login), n, URL, reviewers, NOW), api
 
 
 class ParseTests(unittest.TestCase):
@@ -63,6 +80,13 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(tc.parse("/reopen"), tc.Command("reopen"))
         self.assertEqual(tc.parse("/label bug,  good first issue ,bug"), tc.Command("label", labels=("bug", "good first issue")))
         self.assertEqual(tc.parse("/unlabel bug"), tc.Command("unlabel", labels=("bug",)))
+
+    def test_an_agent_comments_prefix_does_not_hide_the_command(self):
+        self.assertEqual(tc.parse("🤖 Agent: /close not planned"), tc.Command("close", "not_planned"))
+        self.assertEqual(tc.parse("🤖 Agent: /reopen"), tc.Command("reopen"))
+        self.assertEqual(tc.parse("🤖 Agent: /label bug, tooling"), tc.Command("label", labels=("bug", "tooling")))
+        self.assertEqual(tc.parse("🤖 Agent: /unlabel bug"), tc.Command("unlabel", labels=("bug",)))
+        self.assertIsNone(tc.parse("🤖 Agent: thanks"))
 
     def test_first_line_only(self):
         self.assertEqual(tc.parse("/close\n/label release-now"), tc.Command("close", "completed"))
@@ -92,20 +116,25 @@ class AllowTests(unittest.TestCase):
         do("/close", login="ludovic111")
 
     def test_stranger_refused(self):
-        with self.assertRaisesRegex(tc.Refused, "Only Ludovic"):
+        with self.assertRaisesRegex(tc.Refused, "Only the council"):
             do("/close", login="someone")
 
     def test_paused(self):
-        paused = ns.read_reviewers("kacpherek\npaused\n")
+        paused = listing("kacpherek", "paused")
         with self.assertRaisesRegex(tc.Refused, "paused"):
             do("/close", reviewers=paused)
         do("/close", reviewers=paused, login="ludovic111")
 
     def test_the_repos_list_is_the_nightlys(self):
         self.assertEqual(ns.REVIEWERS, ".github/trusted-reviewers.txt")
-        listed = ns.read_reviewers((ROOT / ns.REVIEWERS).read_text())
-        self.assertEqual(listed.logins, {"kacpherek", "rdbtcvs", "online5277", "levzzz5154"})
-        self.assertFalse(listed.paused)
+        self.assertEqual(Path(tc.ns.__file__).resolve(), Path(ns.__file__).resolve())  # one parser for all three
+
+    def test_a_reclaimed_login_is_nobody(self):
+        with self.assertRaisesRegex(tc.Refused, "Only the council"):
+            tc.run(Fake(), tc.parse("/close"), ns.Actor("kacpherek", 555), 5, URL, LIST, NOW)
+        # Ludovic's threads are recognised by his ID, not by a login someone else may hold.
+        api = Fake({5: {"state": "open", "user": {"login": "ludovic111", "id": 555}, "labels": [], "locked": False}})
+        do("/close", api)
 
 
 class ActionTests(unittest.TestCase):
@@ -172,7 +201,7 @@ class RefusalTests(unittest.TestCase):
         for text in ("/close", "/label bug", "/unlabel bug", "/reopen"):
             for t in (thread(user="ludovic111", state="closed" if text == "/reopen" else "open"),
                       thread(user="Ludovic111", pr=True)):
-                with self.assertRaisesRegex(tc.Refused, "Ludovic's"):
+                with self.assertRaisesRegex(tc.Refused, "a council member's"):
                     do(text, Fake({5: t}))
 
     def test_merged_pr(self):
@@ -218,6 +247,11 @@ class LimitTests(unittest.TestCase):
     def test_counts_case_insensitively(self):
         with self.assertRaises(tc.Refused):
             do("/close", Fake(past=past("kacpherek", 60)), login="Kacpherek")
+
+    def test_prefix_login_is_not_charged(self):
+        api = Fake(past=past("bobby", 60))
+        self.assertEqual(tc.actions_by(api, "bob", NOW), 0)
+        self.assertEqual(tc.actions_by(api, "bobby", NOW), 60)
 
     def test_ludovic_is_unlimited(self):
         do("/close", Fake(past=past("ludovic111", 100)), login="ludovic111")

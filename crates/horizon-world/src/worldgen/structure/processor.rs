@@ -1,25 +1,30 @@
 //! Structure processors (`worldgen/processor_list`) and template placement.
-use super::{BlockInfo, BoundingBox, Mirror, Rotation, StructureResources, StructureTemplate};
-use crate::{
-    fluid::FluidKind,
-    heightmap::HeightmapType,
-    nbt::{Compound, JavaString, Tag},
-    registry::BlockStateId,
-    worldgen::{
-        DecodeError,
-        block_feature::FeatureBlockBindings,
-        feature::FeatureWorld,
-        placement::{PlacementContext, PlacementQueryError},
-        rule_test::RuleTest,
-        value_provider::IntProvider,
-    },
-};
 use horizon_core::{
     position::BlockPos,
     random::{LegacyRandom, PositionalRandom, RandomSource, position_seed},
 };
 use serde_json::Value;
 use std::{collections::BTreeSet, sync::Arc};
+use {
+    super::{BlockInfo, Mirror, Rotation, StructureResources, StructureTemplate},
+    horizon_core::bounding_box::BoundingBox,
+};
+use {
+    crate::{
+        fluid::FluidKind,
+        heightmap::HeightmapType,
+        registry::BlockStateId,
+        worldgen::{
+            DecodeError,
+            block_feature::FeatureBlockBindings,
+            feature::FeatureWorld,
+            placement::{PlacementContext, PlacementQueryError},
+            rule_test::RuleTest,
+            value_provider::IntProvider,
+        },
+    },
+    horizon_core::nbt::{Compound, JavaString, Tag},
+};
 
 mod litho;
 mod pillars;
@@ -501,7 +506,7 @@ impl Pick {
             [one] => *one,
             many => many[random.int(many.len() as i32) as usize],
         };
-        let mut nbt = outcome.nbt.clone().or(info.nbt);
+        let mut nbt = outcome.nbt.clone().map(Box::new).or(info.nbt);
         for list in &outcome.lists {
             let values = (0..list.count)
                 .map(|_| {
@@ -514,7 +519,7 @@ impl Pick {
                     Tag::String(v.as_str().into())
                 })
                 .collect();
-            nbt.get_or_insert_with(Compound::new)
+            nbt.get_or_insert_with(Default::default)
                 .insert(list.key.as_str().into(), Tag::List(values));
         }
         BlockInfo {
@@ -671,40 +676,29 @@ impl SpawnerMobs {
     }
 }
 
+/// A block holder set in any form `crate::holder_set` reads; a tag no pack
+/// defines holds no blocks.
 fn holder_set(
     value: &Value,
     bindings: &FeatureBlockBindings<'_>,
 ) -> Result<Arc<BTreeSet<BlockStateId>>, DecodeError> {
-    let names: Vec<&str> = match value {
-        Value::String(s) => vec![s.as_str()],
-        Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
-        _ => return Err(DecodeError::Field("block holder set")),
+    let lookup = super::super::block_feature::BlockSetLookup {
+        bindings,
+        unknown_tags_empty: true,
     };
-    let mut out = BTreeSet::new();
-    for name in names {
-        if let Some(tag) = name.strip_prefix('#') {
-            let tag = super::super::tags::identifier(tag)?;
-            out.extend(
-                bindings
-                    .tags
-                    .get(&tag)
-                    .map(|s| s.iter().copied())
-                    .into_iter()
-                    .flatten(),
-            );
-        } else {
-            let name = super::super::tags::identifier(name)?;
-            out.extend(
-                bindings
-                    .blocks
-                    .get(&name)
-                    .ok_or_else(|| DecodeError::Registry(format!("unknown block {name}")))?
-                    .iter()
-                    .copied(),
-            );
+    let ids = match value {
+        Value::Array(list) => {
+            let mut ids = Vec::new();
+            for value in list.iter().filter(|value| value.is_string()) {
+                ids.extend(
+                    crate::holder_set::resolve(value, &lookup).map_err(DecodeError::Registry)?,
+                );
+            }
+            ids
         }
-    }
-    Ok(Arc::new(out))
+        _ => crate::holder_set::resolve(value, &lookup).map_err(DecodeError::Registry)?,
+    };
+    Ok(Arc::new(ids.into_iter().collect()))
 }
 pub(super) fn json_to_nbt(value: &Value) -> Tag {
     match value {
@@ -729,6 +723,15 @@ fn float(value: &Value, key: &'static str) -> Result<f32, DecodeError> {
         .as_f64()
         .map(|v| v as f32)
         .ok_or(DecodeError::Field(key))
+}
+/// A required float field vanilla reads through `Codec.floatRange`: a value
+/// outside the range, or a NaN, is refused at decode rather than clamped.
+fn float_range(value: &Value, key: &'static str, min: f32, max: f32) -> Result<f32, DecodeError> {
+    let v = float(value, key)?;
+    if !(min..=max).contains(&v) {
+        return Err(DecodeError::Field(key));
+    }
+    Ok(v)
 }
 impl Processor {
     fn decode(
@@ -760,7 +763,7 @@ impl Processor {
                     Some(v) => Some(holder_set(v, bindings)?),
                     None => None,
                 },
-                integrity: float(value, "integrity")?,
+                integrity: float_range(value, "integrity", 0., 1.)?,
             },
             "minecraft:gravity" => Self::Gravity {
                 heightmap: match value.get("heightmap").and_then(Value::as_str) {
@@ -777,10 +780,18 @@ impl Processor {
             "minecraft:block_age" => Self::BlockAge(float(value, "mossiness")?),
             "minecraft:lava_submerged_block" => Self::LavaSubmerged,
             "minecraft:blackstone_replace" => Self::BlackstoneReplace,
-            "minecraft:capped" => Self::Capped {
-                delegate: Box::new(Self::decode(&value["delegate"], resources, bindings)?),
-                limit: IntProvider::from_json(&value["limit"].to_string())?,
-            },
+            "minecraft:capped" => {
+                // CappedProcessor's limit is IntProviders.POSITIVE_CODEC: a
+                // provider that can draw 0 or less is refused at decode.
+                let limit = IntProvider::from_json(&value["limit"].to_string())?;
+                if limit.bounds()[0] < 1 {
+                    return Err(DecodeError::Field("capped limit"));
+                }
+                Self::Capped {
+                    delegate: Box::new(Self::decode(&value["delegate"], resources, bindings)?),
+                    limit,
+                }
+            }
             "minecraft:rule" => Self::Rule(
                 value["rules"]
                     .as_array()
@@ -1143,7 +1154,10 @@ fn process_block<W: PlacementContext>(
                 return Ok(Some(BlockInfo {
                     pos: info.pos,
                     state: rule.output,
-                    nbt: rule.modifier.apply(info.nbt.as_ref(), &mut random),
+                    nbt: rule
+                        .modifier
+                        .apply(info.nbt.as_deref(), &mut random)
+                        .map(Box::new),
                 }));
             }
             Some(info)
@@ -1209,7 +1223,10 @@ fn process_block<W: PlacementContext>(
                     .unwrap_or(state),
                 false => state,
             };
-            let nbt = set.modifier.apply(info.nbt.as_ref(), &mut random);
+            let nbt = set
+                .modifier
+                .apply(info.nbt.as_deref(), &mut random)
+                .map(Box::new);
             Some(BlockInfo { state, nbt, ..info })
         }
         Processor::Condition(c) => {
@@ -1271,7 +1288,7 @@ fn process_block<W: PlacementContext>(
             let entity = spawner.pick(|| settings.with_random(pos, |r| r.float()));
             Some(match entity {
                 Some(entity) => BlockInfo {
-                    nbt: Some(spawner.nbt(entity)),
+                    nbt: Some(Box::new(spawner.nbt(entity))),
                     ..info
                 },
                 None => BlockInfo {
@@ -1457,19 +1474,19 @@ fn process_infos<W: PlacementContext>(
                 before.clone(),
                 settings,
             )?;
-            if let Some(altered) = altered {
-                if altered != before {
-                    replaced += 1;
-                    processed[index] = altered;
-                }
+            if let Some(altered) = altered
+                && altered != before
+            {
+                replaced += 1;
+                processed[index] = altered;
             }
         }
     }
     Ok(processed)
 }
 
-/// StructureTemplate.placeInWorld without entities or neighbor shape updates.
-/// Returns false for empty templates.
+/// StructureTemplate.placeInWorld. Returns false for a template with no
+/// palette, with no blocks and no entities to place, or with a side below 1.
 #[allow(clippy::too_many_arguments)]
 pub fn place_in_world<W: FeatureWorld + PlacementContext>(
     world: &mut W,
@@ -1494,7 +1511,10 @@ pub fn place_in_world<W: FeatureWorld + PlacementContext>(
         .next_int_bound(template.palettes().len() as i32)
         .unwrap_or(0) as usize,
     };
-    if template.palettes()[palette].blocks().is_empty() || template.size.iter().any(|s| *s < 1) {
+    let has_entities = !settings.ignore_entities && !template.entities.is_empty();
+    if (template.palettes()[palette].blocks().is_empty() && !has_entities)
+        || template.size.iter().any(|s| *s < 1)
+    {
         return Ok(false);
     }
     let infos = process_infos(
@@ -1520,8 +1540,9 @@ pub fn place_in_world<W: FeatureWorld + PlacementContext>(
         } else {
             None
         };
-        let state = resources.transforms.rotate(
+        let state = resources.transforms.rotate_at(
             resources.transforms.mirror(info.state, settings.mirror),
+            info.pos,
             settings.rotation,
         );
         if info.nbt.is_some() {
@@ -1539,7 +1560,10 @@ pub fn place_in_world<W: FeatureWorld + PlacementContext>(
                 };
                 nbt.insert("LootTableSeed".into(), Tag::Long(seed));
             }
-            world.set_block_entity(info.pos, nbt)?;
+            if let Some(transform) = resources.registry.structure_block_entity_transform.get() {
+                transform.transform(info.pos, &mut nbt, settings.rotation, settings.mirror);
+            }
+            world.set_block_entity(info.pos, *nbt)?;
         }
         if let Some(previous) = previous {
             if resources.source_fluid(state) {
@@ -1777,6 +1801,25 @@ fn update_shape_at_edge<W: PlacementContext>(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn plain_block_lists_expand_tags_and_ignore_non_strings() {
+        let (mut tag, _) = horizon_core::nbt::parse_snbt(r#"{DataVersion:0,states:[{id:"minecraft:air"},{id:"minecraft:cave_air"},{id:"minecraft:void_air"},{id:"minecraft:oak_log"}],defaults:{"minecraft:air":0,"minecraft:cave_air":1,"minecraft:void_air":2,"minecraft:oak_log":3}}"#).unwrap();
+        *tag.get_mut("DataVersion").unwrap() = Tag::Int(crate::DATA_VERSION);
+        let registry = crate::registry::BlockRegistry::from_nbt(&tag).unwrap();
+        let tags = BTreeMap::from([("minecraft:logs".into(), vec!["minecraft:oak_log".into()])]);
+        let bindings = FeatureBlockBindings::with_tags(&registry, BTreeSet::new(), &tags).unwrap();
+        assert_eq!(
+            *holder_set(&json!(["#minecraft:logs", 19, false, {}]), &bindings).unwrap(),
+            BTreeSet::from([BlockStateId(3)])
+        );
+        assert!(
+            holder_set(&json!(["#minecraft:missing", null]), &bindings)
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     fn spawner(value: Value) -> SpawnerMobs {
         SpawnerMobs::decode(&value, |v| {
@@ -2054,7 +2097,7 @@ mod tests {
         let glass = || BlockInfo {
             pos: [1, 2, 3],
             state: BlockStateId(0),
-            nbt: Some(Compound::new()),
+            nbt: Some(Box::default()),
         };
         let run = |f: f32, i: Vec<i32>| pick.apply(glass(), &mut Draws(vec![f], i));
         let sus = run(0.005, vec![]);
@@ -2065,7 +2108,7 @@ mod tests {
                 .contains_key(&JavaString::from("LootTable"))
         );
         assert_eq!(run(0.01, vec![]).state, BlockStateId(1));
-        assert_eq!(run(0.2999, vec![]).nbt, Some(Compound::new()));
+        assert_eq!(run(0.2999, vec![]).nbt, Some(Box::default()));
         assert_eq!(run(0.3, vec![]).state, BlockStateId(2));
         // The stairs' facing: Plane.HORIZONTAL[nextInt(4)] after the pick.
         assert_eq!(run(0.75, vec![2]).state, BlockStateId(12));

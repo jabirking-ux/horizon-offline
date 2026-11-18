@@ -7,21 +7,27 @@ use super::*;
 pub(super) enum HomeTab {
     #[default]
     Overview,
+    Mods,
     Worlds,
     Multiplayer,
+    /// Resource packs.
     Packs,
+    Shaders,
     Screenshots,
     Console,
 }
 
 impl HomeTab {
-    /// `HORIZON_LAUNCHER_PAGE=worlds` (or `multiplayer`, `packs`, `screenshots`, `console`) opens
-    /// Home on that tab, for screenshots.
+    /// `HORIZON_LAUNCHER_PAGE=worlds` (or `instance-mods`, `multiplayer`, `packs`, `screenshots`,
+    /// `console`) opens Home on that tab, for screenshots.
     pub(super) fn from_env() -> Self {
         match std::env::var("HORIZON_LAUNCHER_PAGE").as_deref() {
+            Ok("instance-mods") => HomeTab::Mods,
+            Ok(page) if page.starts_with("mod-") => HomeTab::Mods,
             Ok("worlds") => HomeTab::Worlds,
             Ok("multiplayer") => HomeTab::Multiplayer,
             Ok("packs") => HomeTab::Packs,
+            Ok("shader-packs") => HomeTab::Shaders,
             Ok("screenshots") => HomeTab::Screenshots,
             Ok("console") => HomeTab::Console,
             _ => HomeTab::Overview,
@@ -31,20 +37,30 @@ impl HomeTab {
 
 impl Launcher {
     /// The tabs the selected instance has now, with how many things each holds (None: not known
-    /// yet, or nothing to count). Screenshots and Console only once there is something to show.
-    fn home_tab_list(&mut self, cx: &mut Context<Self>) -> Vec<(HomeTab, Option<usize>)> {
+    /// yet, or nothing to count). The glass look shows every tab (an empty one says so); the
+    /// blocky look shows Screenshots and Console only once there is something in them.
+    pub(super) fn home_tab_list(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Vec<(HomeTab, Option<usize>)> {
         let mut tabs = vec![(HomeTab::Overview, None)];
         if self.selected_instance().is_none() {
             return tabs;
         }
+        if self.has_mods_tab() {
+            tabs.push((HomeTab::Mods, self.instance_mods_count(cx)));
+        }
         tabs.push((HomeTab::Worlds, self.worlds_count(cx)));
         tabs.push((HomeTab::Multiplayer, Some(self.servers_count())));
-        tabs.push((HomeTab::Packs, Some(self.packs_count())));
+        let (resource, shader) = self.pack_counts();
+        tabs.push((HomeTab::Packs, Some(resource)));
+        tabs.push((HomeTab::Shaders, Some(shader)));
+        let every = self.theme.glass;
         let shots = self.screenshots_count();
-        if shots > 0 {
+        if every || shots > 0 {
             tabs.push((HomeTab::Screenshots, Some(shots)));
         }
-        if !self.prepare_log.is_empty() || self.client.is_some() {
+        if every || !self.prepare_log.is_empty() || self.client.is_some() {
             tabs.push((HomeTab::Console, None));
         }
         tabs
@@ -67,9 +83,11 @@ impl Launcher {
             .children(tabs.into_iter().map(|(tab, count)| {
                 let name = match tab {
                     HomeTab::Overview => tr("Overview"),
+                    HomeTab::Mods => tr("Installed mods"),
                     HomeTab::Worlds => tr("Worlds"),
-                    HomeTab::Multiplayer => tr("Multiplayer"),
-                    HomeTab::Packs => tr("Packs"),
+                    HomeTab::Multiplayer => tr("Saved servers"),
+                    HomeTab::Packs => tr("Resource packs"),
+                    HomeTab::Shaders => tr("Shaders"),
                     HomeTab::Screenshots => tr("Screenshots"),
                     HomeTab::Console => tr("Console"),
                 };
@@ -87,12 +105,16 @@ impl Launcher {
         // The open tab's own buttons sit at the strip's end, as a list's header would.
         let (actions, body) = match open {
             HomeTab::Overview => (None, Some(overview.into_any_element())),
+            HomeTab::Mods => {
+                let (actions, body) = split(self.instance_mods_tab(cx));
+                (Some(actions), Some(body))
+            }
             HomeTab::Worlds => (
                 None,
                 self.worlds_section(cx).map(IntoElement::into_any_element),
             ),
             HomeTab::Multiplayer => self.multiplayer_section(cx).map(split).unzip(),
-            HomeTab::Packs => self.packs_section(cx).map(split).unzip(),
+            HomeTab::Packs | HomeTab::Shaders => self.packs_section(cx).map(split).unzip(),
             HomeTab::Screenshots => self.screenshots_section(cx).map(split).unzip(),
             HomeTab::Console => self.console_section(cx).map(split).unzip(),
         };

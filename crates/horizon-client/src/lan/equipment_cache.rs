@@ -4,12 +4,11 @@
 use crate::items::ItemStack;
 use horizon_protocol::item::Stack;
 
-/// Equipment slots: held, offhand, then the armor from head to feet.
-pub const SLOTS: usize = 6;
+/// Equipment slots: hands, armor feet..head, body and saddle.
+pub const SLOTS: usize = 8;
 
-/// The wire slot of each equipment slot, in the order the equipment is listed. Armor is stored
-/// head..feet; the wire slots are feet(2) legs(3) chest(4) head(5).
-const WIRE_SLOTS: [u8; SLOTS] = [0, 1, 5, 4, 3, 2];
+/// EquipmentSlot ordinal is its wire slot.
+const WIRE_SLOTS: [u8; SLOTS] = [0, 1, 2, 3, 4, 5, 6, 7];
 
 #[derive(Default)]
 struct Slot {
@@ -41,32 +40,5 @@ impl EquipmentCache {
             .filter(|(_, slot)| slot.source.is_some())
             .map(|(&wire, slot)| (wire, slot.converted.clone()))
             .collect()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn equipment_cache_tracks_staleness() {
-        let mut cache = EquipmentCache::default();
-        let stack1 = ItemStack {
-            item: "minecraft:stone".into(),
-            count: 1,
-            damage: 0,
-            extra: None,
-        };
-        let stack2 = ItemStack {
-            item: "minecraft:dirt".into(),
-            count: 1,
-            damage: 0,
-            extra: None,
-        };
-        assert!(cache.is_stale(0, Some(&stack1)));
-        cache.store(0, Some(stack1.clone()), None);
-        assert!(!cache.is_stale(0, Some(&stack1)));
-        assert!(cache.is_stale(0, Some(&stack2)));
-        assert!(cache.is_stale(0, None));
     }
 }

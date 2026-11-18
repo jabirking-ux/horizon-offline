@@ -23,9 +23,21 @@
 //!   instance's game folder in `profiles/<name>/`.
 //!   <https://support.modrinth.com/en/articles/8797641-modrinth-app-storage-folder-location>,
 //!   <https://github.com/modrinth/code/issues/5825>
+//! - ATLauncher: no public page describes the files of an instance, so this follows what real
+//!   instances show. Four `instance.json` files that players committed to public repositories
+//!   (`Benbentwo-Games/CLIENT-CustomModPack`, `Zencal/cobbleverse-neoforge-zen`,
+//!   `Shadowdragon019/The-Break-Engineer-Modpack`, `Phremic/Gobbomon-Forge`) sit at the root of
+//!   an instance folder, beside its `config/`, `saves/` and other game files, so that folder is
+//!   the game folder. They agree on `id` (the Minecraft version), `launcher.name` and
+//!   `launcher.loaderVersion` (a `type` of `Forge` or `NeoForge` and a `version`). Fabric and
+//!   Quilt never appear in them: those two names come from the loader types the ATLauncher wiki
+//!   lists for packs (<https://wiki.atlauncher.com/pack-admin/xml/loaders/>), and an instance
+//!   whose type is none of the four copies without a loader. A user's guide shows the instances
+//!   in a folder named `instances` (<https://github.com/Griefed/ServerPackCreator>, README).
+//!   Every other field is ignored.
 //!
-//! Neither app describes where it records an instance's Minecraft version, so the player names
-//! it when copying one.
+//! Neither the CurseForge app nor the Modrinth App describes where it records an instance's
+//! Minecraft version, so the player names it when copying one.
 use crate::instances::{self, Instance};
 use crate::loaders;
 use crate::sources::{self, Folders, Os};
@@ -71,16 +83,44 @@ const SHARED: [&str; 9] = [
     "servers.dat",
     "optionsshaders.txt",
 ];
-/// What is never copied from an instance's own game folder: logs, and the CurseForge app's own
-/// files.
-const SKIPPED: [&str; 4] = [
+/// What is never copied from an instance's own game folder: logs, the CurseForge app's own
+/// files, and the BlueMap web maps the game asks for tiles around the player
+/// (`horizon_client_render::bluemap::SERVERS_FILE`): only the player names those, never a pack
+/// the other launcher installed.
+const SKIPPED: [&str; 7] = [
     "logs",
     "crash-reports",
     "minecraftinstance.json",
     ".curseclient",
+    "horizon-bluemap.txt",
+    // Far terrain's copies of what servers sent, and of their web maps.
+    "server-terrain",
+    // The browser's list of what it installed (and may delete): only this launcher writes it.
+    "mod-browser.json",
 ];
 const CURSEFORGE: &str = "the CurseForge app";
 const MODRINTH_APP: &str = "the Modrinth App";
+const ATLAUNCHER: &str = "ATLauncher";
+
+/// The name a launcher goes by on its own window, for a list: `launcher` as [`Found`] names it.
+pub fn app_name(launcher: &'static str) -> &'static str {
+    match launcher {
+        OFFICIAL => "Minecraft Launcher",
+        CURSEFORGE => "CurseForge",
+        MODRINTH_APP => "Modrinth App",
+        other => other,
+    }
+}
+
+fn loader_of_name(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "fabric" => Some("fabric"),
+        "quilt" => Some("quilt"),
+        "neoforge" => Some("neoforge"),
+        "forge" => Some("forge"),
+        _ => None,
+    }
+}
 
 fn loader_of_uid(uid: &str) -> Option<&'static str> {
     match uid {
@@ -274,7 +314,41 @@ fn game_folders(dir: &Path, launcher: &'static str) -> Vec<Found> {
 
 /// The CurseForge app's instances: in its modding folder's `Instances/`.
 pub fn curseforge_instances(root: &Path) -> Vec<Found> {
-    game_folders(&root.join("Instances"), CURSEFORGE)
+    curseforge_instances_in(&root.join("Instances"))
+}
+
+/// The CurseForge instances in `dir`, the app's `Instances/` folder itself.
+fn curseforge_instances_in(dir: &Path) -> Vec<Found> {
+    game_folders(dir, CURSEFORGE)
+        .into_iter()
+        .map(with_curseforge_target)
+        .collect()
+}
+
+/// One of the folders in `dir` holds `file`: `minecraftinstance.json` in a folder of CurseForge
+/// instances, `mmc-pack.json` in a Prism or MultiMC one.
+fn child_holds(dir: &Path, file: &str) -> bool {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| e.path().join(file).is_file())
+}
+
+/// `found` with the Minecraft version and loader its CurseForge instance records
+/// (`minecraftinstance.json`, else `manifest.json`). An instance that records neither, or a
+/// loader Horizon doesn't name, keeps none.
+fn with_curseforge_target(mut found: Found) -> Found {
+    let Some((minecraft, loader, version)) =
+        horizon_port_pack::import::curseforge_instance_target(&found.game)
+    else {
+        return found;
+    };
+    found.minecraft = Some(minecraft);
+    found.loader = loader_of_name(&loader)
+        .filter(|_| !version.is_empty())
+        .map(|name| Loader { name, version });
+    found
 }
 
 /// The Modrinth App's instances: in its folder's `profiles/`.
@@ -282,9 +356,79 @@ pub fn modrinth_app_profiles(root: &Path) -> Vec<Found> {
     game_folders(&root.join("profiles"), MODRINTH_APP)
 }
 
+/// The loader of an ATLauncher instance: its `launcher.loaderVersion` holds a `type` and a
+/// `version`. Forge and NeoForge are what real instances show; Fabric and Quilt are the names the
+/// wiki lists. Anything else is no loader.
+fn atlauncher_loader(launcher: &Value) -> Option<Loader> {
+    let entry = launcher.get("loaderVersion")?;
+    let kind = entry.get("type")?.as_str()?.trim();
+    let version = entry.get("version")?.as_str()?.trim();
+    let name = ["fabric", "quilt", "neoforge", "forge"]
+        .into_iter()
+        .find(|n| n.eq_ignore_ascii_case(kind))?;
+    (!version.is_empty()).then(|| Loader {
+        name,
+        version: version.to_string(),
+    })
+}
+
+/// An ATLauncher instance: the folder holding an `instance.json` that has an `id` (the Minecraft
+/// version) and a `launcher` object. The folder is the game folder.
+pub fn atlauncher_instance(dir: &Path) -> Option<Found> {
+    let text = fs::read_to_string(dir.join("instance.json")).ok()?;
+    let json: Value = serde_json::from_str(&text).ok()?;
+    let minecraft = json.get("id")?.as_str()?.trim();
+    let launcher = json.get("launcher").filter(|l| l.is_object())?;
+    if minecraft.is_empty() {
+        return None;
+    }
+    let name = launcher
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(String::from)
+        .or_else(|| dir.file_name().map(|n| n.to_string_lossy().into_owned()))?;
+    Some(Found {
+        launcher: ATLAUNCHER,
+        name,
+        minecraft: Some(minecraft.to_string()),
+        loader: atlauncher_loader(launcher),
+        game: dir.to_path_buf(),
+        shared: false,
+    })
+}
+
+/// The ATLauncher instances under `root`: in its `instances` folder (any capitalisation) when it
+/// has one, else directly in `root`.
+pub fn atlauncher_instances(root: &Path) -> Vec<Found> {
+    let children = |dir: &Path| -> Vec<PathBuf> {
+        fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .collect()
+    };
+    let dir = children(root)
+        .into_iter()
+        .find(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("instances"))
+        })
+        .unwrap_or_else(|| root.to_path_buf());
+    let mut found: Vec<Found> = children(&dir)
+        .iter()
+        .filter_map(|p| atlauncher_instance(p))
+        .collect();
+    found.sort_by_key(|f| f.name.to_lowercase());
+    found
+}
+
 /// What one folder holds: an official launcher's profiles, a Prism or MultiMC root (or its
-/// `instances/`), the CurseForge app's modding folder, the Modrinth App's folder, or a single
-/// instance folder.
+/// `instances/`), the CurseForge app's modding folder (or its `Instances/`), the Modrinth App's
+/// folder, or a single instance folder.
 pub fn in_folder(dir: &Path, launcher: Option<&'static str>) -> Vec<Found> {
     if dir.join("launcher_profiles.json").is_file() {
         return official_profiles(dir);
@@ -295,10 +439,23 @@ pub fn in_folder(dir: &Path, launcher: Option<&'static str>) -> Vec<Found> {
         return game_folders(parent, CURSEFORGE)
             .into_iter()
             .filter(|f| f.game.file_name() == name)
+            .map(with_curseforge_target)
             .collect();
     }
-    if dir.join("Instances").is_dir() {
+    if dir.join("instance.json").is_file() {
+        return atlauncher_instance(dir).into_iter().collect();
+    }
+    let atlauncher = atlauncher_instances(dir);
+    if !atlauncher.is_empty() {
+        return atlauncher;
+    }
+    // Where names ignore case (Windows, macOS), a Prism root's `instances` is `Instances` too.
+    let instances = dir.join("Instances");
+    if instances.is_dir() && !child_holds(&instances, "mmc-pack.json") {
         return curseforge_instances(dir);
+    }
+    if child_holds(dir, "minecraftinstance.json") {
+        return curseforge_instances_in(dir);
     }
     if dir.join("profiles").is_dir() {
         return modrinth_app_profiles(dir);
@@ -321,6 +478,20 @@ pub fn in_folder(dir: &Path, launcher: Option<&'static str>) -> Vec<Found> {
     }
 }
 
+/// The folders [`scan`] looks in, whether they exist or not.
+pub fn scanned_folders(os: Os, folders: &Folders) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let known = sources::known_folders(os, folders)
+        .into_iter()
+        .map(|(_, d)| d);
+    for dir in known.chain(curseforge_folders(os, folders)) {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
 /// Every instance the launchers on this computer keep in their default folders.
 pub fn scan(os: Os, folders: &Folders) -> Vec<Found> {
     let mut found = Vec::new();
@@ -334,6 +505,7 @@ pub fn scan(os: Os, folders: &Folders) -> Vec<Found> {
             OFFICIAL => found.extend(official_profiles(&dir)),
             "Prism Launcher" | "MultiMC" => found.extend(prism_instances(&dir, launcher)),
             "Modrinth App" => found.extend(modrinth_app_profiles(&dir)),
+            ATLAUNCHER => found.extend(atlauncher_instances(&dir)),
             _ => {}
         }
     }
@@ -348,8 +520,13 @@ pub fn scan(os: Os, folders: &Folders) -> Vec<Found> {
 /// The CurseForge app's default modding folder on `os`.
 pub fn curseforge_folders(os: Os, folders: &Folders) -> Vec<PathBuf> {
     match os {
-        Os::Windows => vec![folders.home.join("curseforge/minecraft")],
-        Os::MacOs | Os::Linux => vec![folders.home.join("Documents/curseforge/minecraft")],
+        // One component at a time, so the path shows with one kind of separator.
+        Os::Windows => vec![folders.home.join("curseforge").join("minecraft")],
+        Os::MacOs | Os::Linux => vec![folders
+            .home
+            .join("Documents")
+            .join("curseforge")
+            .join("minecraft")],
     }
 }
 
@@ -382,7 +559,7 @@ pub fn copy_game(found: &Found, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The loader `found` runs, when Horizon installs it (Fabric, Quilt): at the same version.
+/// The loader `found` runs, at the same version, when Horizon installs it ([`loaders::Kind`]).
 pub fn loader(found: &Found) -> Option<loaders::Loader> {
     let l = found.loader.as_ref()?;
     Some(loaders::Loader {

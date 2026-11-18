@@ -3,6 +3,7 @@
 //! after its own decoration and its eight neighbours', and chunks that
 //! decoration wrote to are saved rather than generated again without those
 //! writes. Bastions lost whole chunks of pieces this way.
+extern crate horizon_client_lib as horizon_client;
 use horizon_client::{
     assets::Assets,
     biome::Biomes,
@@ -14,7 +15,9 @@ use horizon_client::{
     streaming::{ChunkGenerator, Proto, Streaming, WorkerContext},
     world::World,
 };
-use horizon_world::registry::BlockStateId;
+use horizon_world::{native_load_context::DataLoadOrigin, registry::BlockStateId};
+#[path = "../src/test_resources.rs"]
+mod test_resources;
 use std::{
     collections::HashMap,
     path::Path,
@@ -52,6 +55,7 @@ impl Recorder {
     fn save_chunk(&self, chunk: &Chunk) {
         let mut saved = chunk.clone();
         saved.fresh = false;
+        saved.generated = false;
         self.chunks
             .lock()
             .unwrap()
@@ -154,7 +158,7 @@ impl Session {
             let before = (self.streaming.generated_total, self.world.chunks.len());
             self.update();
             thread::sleep(Duration::from_millis(5));
-            let idle = self.streaming.pending() == 0
+            let idle = !self.streaming.busy()
                 && before == (self.streaming.generated_total, self.world.chunks.len());
             quiet = if idle { quiet + 1 } else { 0 };
         }
@@ -165,8 +169,26 @@ impl Session {
     }
     fn save(&mut self) {
         let deadline = Instant::now() + Duration::from_secs(120);
-        while !self.streaming.poll_save(&mut self.world) {
+        'save: loop {
             assert!(Instant::now() < deadline, "incremental save never finished");
+            let tick_deadline = Instant::now() + Duration::from_millis(2);
+            loop {
+                match self
+                    .streaming
+                    .prepare_poll_save(&mut self.world, tick_deadline)
+                {
+                    horizon_client::streaming::SaveStep::Pending => break,
+                    horizon_client::streaming::SaveStep::Full(chunk) => {
+                        self.streaming.save_finished(chunk)
+                    }
+                    horizon_client::streaming::SaveStep::Protos(protos) => {
+                        if self.streaming.submit_protos(protos) {
+                            break 'save;
+                        }
+                        break;
+                    }
+                }
+            }
             thread::sleep(Duration::from_millis(1));
         }
         for key in std::mem::take(&mut self.world.modified) {
@@ -177,22 +199,63 @@ impl Session {
     }
 }
 
+fn worker_context(root: &Path) -> Arc<WorkerContext> {
+    let assets = Arc::new(Assets::load(root).unwrap());
+    let render = Arc::new(
+        assets
+            .reload(&horizon_assets::resource_source::ResourceRoot::directory(
+                root.to_path_buf(),
+            ))
+            .unwrap(),
+    );
+    let facts = BlockFacts::load(root, assets.registry).unwrap();
+    let visibility = models::load_visibility(root, assets.registry).unwrap();
+    Arc::new(WorkerContext {
+        tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility, None).unwrap()),
+        light: Arc::new(LightTables::load(root, assets.registry, &facts).unwrap()),
+        biomes: Arc::new(
+            Biomes::load(&horizon_assets::resource_source::ResourceRoot::directory(
+                root.to_path_buf(),
+            ))
+            .unwrap(),
+        ),
+        assets,
+        render: render.clone(),
+        hidden_states: Arc::from([]),
+        part_tables: Default::default(),
+    })
+}
+
+/// What native mods hear (`native_chunk_load`): a column just generated is
+/// new, one read back from the save isn't, and each arrival is told once.
+#[test]
+fn a_new_column_is_told_apart_from_a_saved_one() {
+    let Some(root) = resources() else {
+        return;
+    };
+    let context = worker_context(&root);
+    let generator = Arc::new(Recorder::default());
+    let mut session = Session::new(generator.clone(), context.clone());
+    session.settle_at((0, 0));
+    let first = std::mem::take(&mut session.world.loaded_chunks);
+    assert!(first.contains(&(0, 0, true)), "{first:?}");
+    assert!(first.iter().all(|c| c.2), "{first:?}");
+    let residents = session.world.chunks.len();
+    assert_eq!(first.len(), residents, "one arrival for each column");
+    session.save();
+    drop(session);
+    let mut session = Session::new(generator, context);
+    session.settle_at((0, 0));
+    let again = std::mem::take(&mut session.world.loaded_chunks);
+    assert!(again.contains(&(0, 0, false)), "{again:?}");
+}
+
 #[test]
 fn chunks_left_behind_keep_their_decoration() {
     let Some(root) = resources() else {
         return;
     };
-    let assets = Arc::new(Assets::load(&root).unwrap());
-    let render = Arc::new(assets.reload(&root).unwrap());
-    let facts = BlockFacts::load(&root, assets.registry).unwrap();
-    let visibility = models::load_visibility(&root, assets.registry).unwrap();
-    let context = Arc::new(WorkerContext {
-        tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility).unwrap()),
-        light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
-        biomes: Arc::new(Biomes::load(&root).unwrap()),
-        assets,
-        render: render.clone(),
-    });
+    let context = worker_context(&root);
     let generator = Arc::new(Recorder::default());
     let mut session = Session::new(generator.clone(), context.clone());
     // Generate an area, walk away from it in steps (its edge unloads a ring
@@ -253,15 +316,28 @@ fn proto_chunks_are_viewed_once_per_state() {
         return;
     };
     let assets = Arc::new(Assets::load(&root).unwrap());
-    let render = Arc::new(assets.reload(&root).unwrap());
+    let render = Arc::new(
+        assets
+            .reload(&horizon_assets::resource_source::ResourceRoot::directory(
+                root.to_path_buf(),
+            ))
+            .unwrap(),
+    );
     let facts = BlockFacts::load(&root, assets.registry).unwrap();
     let visibility = models::load_visibility(&root, assets.registry).unwrap();
     let context = Arc::new(WorkerContext {
-        tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility).unwrap()),
+        tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility, None).unwrap()),
         light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
-        biomes: Arc::new(Biomes::load(&root).unwrap()),
+        biomes: Arc::new(
+            Biomes::load(&horizon_assets::resource_source::ResourceRoot::directory(
+                root.to_path_buf(),
+            ))
+            .unwrap(),
+        ),
         assets,
         render: render.clone(),
+        hidden_states: Arc::from([]),
+        part_tables: Default::default(),
     });
     let generator = Arc::new(Recorder::default());
     let mut session = Session::new(generator.clone(), context);
@@ -297,11 +373,21 @@ fn saved_proto_chunks_restore_exactly() {
         return;
     };
     let assets = Arc::new(Assets::load(&root).unwrap());
-    let biomes = Arc::new(Biomes::load(&root).unwrap());
+    let biomes = Arc::new(
+        Biomes::load(&horizon_assets::resource_source::ResourceRoot::directory(
+            root.to_path_buf(),
+        ))
+        .unwrap(),
+    );
+    let item_data = test_resources::item_data(&root, DataLoadOrigin::ServerDataLoad).unwrap();
     let terrain = VanillaTerrain::for_dimension(
-        &root.join("worldgen"),
-        assets.registry,
-        &biomes,
+        horizon_client::vanillagen::TerrainResources {
+            data: None,
+            dir: &root.join("worldgen"),
+            registry: assets.registry,
+            biomes: &biomes,
+            item_data: &item_data,
+        },
         -1860902098141295193,
         "minecraft:the_nether",
     )
@@ -325,15 +411,62 @@ fn saved_proto_chunks_restore_exactly() {
     generator.decorate(&mut worker, &mut region);
     assert!(generator.is_decorated(&region[4]));
     generator.save_protos(&region.iter().collect::<Vec<_>>());
+    let mut seeded = generator.inner.saved_proto(&region[4]).unwrap();
+    let extras = seeded.column.saved.get_or_insert_with(Default::default);
+    let extras = Arc::make_mut(extras);
+    extras
+        .root
+        .insert("example:unknown".into(), horizon_core::nbt::Tag::Int(42));
+    let attachment = horizon_core::nbt::Compound::from_iter([(
+        "example:data".into(),
+        horizon_core::nbt::Tag::Int(9),
+    )]);
+    extras.attachments =
+        horizon_mod_runtime::attachments::Attachments::from_nbt(attachment.clone());
+    save.save_protos(vec![seeded], assets.registry, &generator.biomes)
+        .unwrap();
     save.flush().unwrap();
-    let restored: Vec<Proto> = keys
-        .iter()
-        .map(|&(x, z)| generator.proto(&mut worker, x, z))
-        .collect();
+    let mut restored: [Proto; 9] = std::array::from_fn(|i| {
+        let (x, z) = keys[i];
+        generator.proto(&mut worker, x, z)
+    });
+    // Decoration mutates the checked-out region after the unknown key is restored.
+    generator.decorate(&mut worker, &mut region);
+    generator.decorate(&mut worker, &mut restored);
+    generator.save_protos(&[&restored[4]]);
+    save.flush().unwrap();
+    let proto = save
+        .load_proto(keys[4].0, keys[4].1, assets.registry, &generator.biomes)
+        .unwrap();
+    assert_eq!(
+        proto
+            .column
+            .saved
+            .as_ref()
+            .unwrap()
+            .root
+            .get(&"example:unknown".into()),
+        Some(&horizon_core::nbt::Tag::Int(42))
+    );
+    assert_eq!(
+        proto.column.saved.as_ref().unwrap().attachments.to_nbt(),
+        attachment
+    );
     for (i, (original, restored)) in region.into_iter().zip(restored).enumerate() {
         assert_eq!(generator.is_decorated(&restored), i == 4);
         let (a, b) = (generator.finish(original), generator.finish(restored));
         let (x, z) = keys[i];
+        if i == 4 {
+            save.save(&[Arc::new(b.clone())], assets.registry, &generator.biomes)
+                .unwrap();
+            let loaded = save.load(x, z, assets.registry, &generator.biomes).unwrap();
+            let extras = loaded.saved.unwrap();
+            assert_eq!(
+                extras.root.get(&"example:unknown".into()),
+                Some(&horizon_core::nbt::Tag::Int(42))
+            );
+            assert_eq!(extras.attachments.to_nbt(), attachment);
+        }
         for y in horizon_client::chunk::MIN_Y..horizon_client::chunk::MIN_Y + 384 {
             for lz in 0..16 {
                 for lx in 0..16 {
@@ -358,6 +491,7 @@ fn saved_proto_chunks_restore_exactly() {
             c.saved
                 .as_ref()
                 .map(|s| (s.block_ticks.clone(), s.fluid_ticks.clone()))
+                .unwrap_or_default()
         };
         assert_eq!(ticks(&a), ticks(&b), "chunk {x} {z}");
     }
@@ -372,19 +506,29 @@ fn saved_proto_block_entities_keep_their_id() {
         save::{Persistent, SaveDir},
         vanillagen::VanillaTerrain,
     };
-    use horizon_world::{
-        nbt::{Limits, Tag},
-        region::RegionFile,
+    use {
+        horizon_core::nbt::{Limits, Tag},
+        horizon_world::region::RegionFile,
     };
     let Some(root) = resources() else {
         return;
     };
     let assets = Arc::new(Assets::load(&root).unwrap());
-    let biomes = Arc::new(Biomes::load(&root).unwrap());
+    let biomes = Arc::new(
+        Biomes::load(&horizon_assets::resource_source::ResourceRoot::directory(
+            root.to_path_buf(),
+        ))
+        .unwrap(),
+    );
+    let item_data = test_resources::item_data(&root, DataLoadOrigin::ServerDataLoad).unwrap();
     let terrain = VanillaTerrain::for_dimension(
-        &root.join("worldgen"),
-        assets.registry,
-        &biomes,
+        horizon_client::vanillagen::TerrainResources {
+            data: None,
+            dir: &root.join("worldgen"),
+            registry: assets.registry,
+            biomes: &biomes,
+            item_data: &item_data,
+        },
         12345,
         "minecraft:overworld",
     )
@@ -434,4 +578,104 @@ fn saved_proto_block_entities_keep_their_id() {
     drop(generator);
     drop(save);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What the game's generator, `Persistent`, passes on of beside-final decoration: the block
+/// entities a decoration made in a chunk saved by an older version reach `World` only if
+/// `Persistent` forwards `final_block_entities` (the trait default is none).
+#[test]
+fn persistent_forwards_the_block_entities_decoration_made_in_a_final_chunk() {
+    use horizon_client::{
+        chunk::block_entity::BlockEntity,
+        save::{Persistent, SaveDir},
+    };
+    struct Marked;
+    impl ChunkGenerator for Marked {
+        type Worker = ();
+        fn worker(&self) {}
+        fn proto(&self, _: &mut (), _: i32, _: i32) -> Proto {
+            Box::new(())
+        }
+        fn finish(&self, _: Proto) -> Chunk {
+            Chunk::empty(0, 0)
+        }
+        fn final_block_entities(
+            &self,
+            entries: &[(&Proto, &[([i32; 3], u32)])],
+        ) -> Vec<((i32, i32, i32), BlockEntity)> {
+            entries
+                .iter()
+                .flat_map(|(_, writes)| writes.iter())
+                .map(|([x, y, z], _)| ((*x, *y, *z), BlockEntity::Chest(Vec::new())))
+                .collect()
+        }
+    }
+    let Some(root) = resources() else {
+        return;
+    };
+    let assets = Arc::new(Assets::load(&root).unwrap());
+    let biomes = Arc::new(
+        Biomes::load(&horizon_assets::resource_source::ResourceRoot::directory(
+            root.to_path_buf(),
+        ))
+        .unwrap(),
+    );
+    let dir = std::env::temp_dir().join(format!("horizon-final-be-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let generator = Persistent {
+        inner: Arc::new(Marked),
+        save: Arc::new(SaveDir::new(
+            dir.clone(),
+            horizon_client::save::LevelShape::OVERWORLD,
+        )),
+        registry: assets,
+        biomes,
+    };
+    let proto = Box::new(()) as Proto;
+    let made = generator.final_block_entities(&[(&proto, &[([1, 64, 2], 5)])]);
+    assert_eq!(made.len(), 1, "Persistent drops the block entities");
+    assert_eq!(made[0].0, (1, 64, 2));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `NoiseGeneratorSettings.disableMobGeneration` reaches the client's
+/// `spawnOriginalMobs` gate from the shipped presets: the End asks for no
+/// creature packs at generation and the overworld and nether ask for them.
+#[test]
+fn the_end_asks_for_no_creature_packs_and_the_overworld_does() {
+    use horizon_client::{assets::Assets, biome::Biomes, vanillagen::VanillaTerrain};
+    let Some(root) = resources() else {
+        return;
+    };
+    let assets = Arc::new(Assets::load(&root).unwrap());
+    let biomes = Arc::new(
+        Biomes::load(&horizon_assets::resource_source::ResourceRoot::directory(
+            root.clone(),
+        ))
+        .unwrap(),
+    );
+    let item_data = test_resources::item_data(&root, DataLoadOrigin::ServerDataLoad).unwrap();
+    for (dimension, want) in [
+        ("minecraft:overworld", false),
+        ("minecraft:the_nether", false),
+        ("minecraft:the_end", true),
+    ] {
+        let terrain = VanillaTerrain::for_dimension(
+            horizon_client::vanillagen::TerrainResources {
+                data: None,
+                dir: &root.join("worldgen"),
+                registry: assets.registry,
+                biomes: &biomes,
+                item_data: &item_data,
+            },
+            12345,
+            dimension,
+        )
+        .unwrap();
+        assert_eq!(
+            terrain.disable_mob_generation(),
+            want,
+            "disable_mob_generation of {dimension}"
+        );
+    }
 }

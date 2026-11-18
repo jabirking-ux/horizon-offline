@@ -229,8 +229,31 @@ def catalyst_scenarios(count, seed):
     return out
 
 
+def mob_scenarios():
+    """A mob's own game events: a creeper's fuse (Creeper.tick's PRIME_FUSE once ignited), a mob
+    eating (Mob.ate's EAT), in range of a sensor or not; the fuse ends after the scenario. These run
+    last: their mobs take entity ids from vanilla's global counter, and experience orbs merge by id
+    (ExperienceOrb.canMerge), so mobs added before the catalyst scenarios would change their orbs."""
+    s = []
+
+    def add(name, ticks, lines, opts=''):
+        s.append((name, ticks, opts, lines))
+
+    sensor = f'block 0 {FLOOR} 0 {SENSOR}'
+    watch = f'watch 0 {FLOOR} 0'
+    add('mob_creeper_fuse', 25, [sensor, watch, 'player 6.5 -60 6.5', 'mob minecraft:creeper 2.5 -60 0.5 0 7 noai',
+                                 'at 2 ignite m0'])
+    add('mob_creeper_fuse_far', 25, [sensor, watch, 'player 6.5 -60 6.5', 'mob minecraft:creeper 9.5 -60 0.5 0 7 noai',
+                                     'at 2 ignite m0'])
+    add('mob_sheep_eat', 40, [sensor, watch, 'player 6.5 -60 6.5', 'mob minecraft:sheep 3.5 -60 0.5 90 11 noai',
+                              'at 2 ate m0'])
+    add('mob_calibrated_eat', 40, [f'block 0 {FLOOR} 0 {CALIBRATED}[facing=east]', watch, f'block 1 {FLOOR} 0 minecraft:redstone_block',
+                                   'player 6.5 -60 6.5', 'mob minecraft:sheep 3.5 -60 0.5 90 11 noai', 'at 2 ate m0'])
+    return s
+
+
 def scenarios(count, seed):
-    return handwritten() + random_scenarios(count, seed) + catalyst_scenarios(count // 3, seed)
+    return handwritten() + random_scenarios(count, seed) + catalyst_scenarios(count // 3, seed) + mob_scenarios()
 
 
 def write_scenarios(path, chosen):
@@ -310,6 +333,10 @@ def compare(vanilla, rust):
         if bad is None:
             clean += 1
             report.append(f'{name}: all {len(v)} ticks match')
+    # The comparison is symmetric: a scenario that only Horizon recorded is a
+    # difference too, not a silently accepted extra that passes as parity.
+    for name in sorted(set(rust) - set(vanilla)):
+        report.append(f'{name}: missing from vanilla')
     return report, clean
 
 
@@ -336,7 +363,7 @@ def main():
                                    'dev.horizonlab.parity.VanillaSculkOracle', inputs, build / 'vanilla.txt'],
                                   build, 'vanilla', timeout=3600)
     if not args.java_only:
-        oracle_harness.run_logged(['cargo', 'build', '--locked', '--profile', 'fast', '-p', 'horizon-client', '--bin', 'horizon-client'],
+        oracle_harness.run_logged(['cargo', 'build', '--locked', '--profile', 'fast', '-p', 'horizon-game', '--bin', 'horizon-client'],
                                   build, 'compile-rust')
         oracle_harness.run_logged([lab.cargo_target() / 'fast/horizon-client', '--resources', resources], build, 'horizon',
                                   env=lab.game_env(HORIZON_SCULK_FIXTURE=f'{inputs},{build / "horizon.txt"}'))
@@ -344,11 +371,13 @@ def main():
         return
     names = {s[0] for _, s in chosen}
     vanilla = {k: v for k, v in parse(build / 'vanilla.txt').items() if k in names}
-    report, clean = compare(vanilla, parse(build / 'horizon.txt'))
+    horizon = parse(build / 'horizon.txt')
+    report, clean = compare(vanilla, horizon)
     (build / 'report.txt').write_text('\n'.join(report) + '\n')
     print('\n'.join(line for line in report if not line.endswith('ticks match')))
-    print(f'{clean}/{len(vanilla)} scenarios match on every tick')
-    if not args.report_only and clean != len(vanilla):
+    total = len(set(vanilla) | set(horizon))
+    print(f'{clean}/{total} scenarios match on every tick')
+    if not args.report_only and clean != total:
         raise SystemExit(1)
 
 

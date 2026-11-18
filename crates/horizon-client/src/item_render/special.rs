@@ -4,7 +4,7 @@
 //! as vanilla's `submit` does (no block-entity placement transform) and
 //! reports `getExtents` over the same posed parts.
 use super::{Foil, ItemQuad, ItemRenderer, ItemSink, SpecialHost, argb};
-use crate::{block_entity_render::ModelPart, hud::Rect};
+use crate::{block_entity_render::ModelPart, hud::Rect, mobs::EntityModelDocument};
 use glam::{Mat4, Quat, Vec3};
 use horizon_assets::item_model::{SpecialKind, SpecialModel};
 use serde_json::Value;
@@ -55,6 +55,16 @@ pub(super) fn load_parts(root: &Path) -> HashMap<String, ModelPart> {
     else {
         return HashMap::new();
     };
+    load_parts_from_value(&all)
+}
+
+pub(super) fn load_parts_from_document(
+    document: &EntityModelDocument,
+) -> HashMap<String, ModelPart> {
+    load_parts_from_value(document.value())
+}
+
+fn load_parts_from_value(all: &Value) -> HashMap<String, ModelPart> {
     LAYERS
         .iter()
         .chain(COPPER_GOLEM_LAYERS.iter())
@@ -73,6 +83,15 @@ impl ItemSink for CullBack<'_> {
             cull_back: true,
             ..quad
         });
+    }
+}
+
+/// Marks every quad passed on as drawn with a render type that has an `OitPipelineSet`
+/// (`RenderTypes.entityTranslucent`).
+struct OitEntity<'a>(&'a mut dyn ItemSink);
+impl ItemSink for OitEntity<'_> {
+    fn quad(&mut self, quad: ItemQuad) {
+        self.0.quad(ItemQuad { oit: true, ..quad });
     }
 }
 
@@ -127,12 +146,14 @@ fn draw(
                 ]
             }),
             foil_uv: poly.map(|v| [v[3], v[4]]),
+            gui_glint_uv: None,
             normal,
             color,
             foil,
             light_emission: 0,
             cull_back: false,
             translucent: false,
+            oit: false,
         });
     }
     for (child_name, child) in &part.children {
@@ -189,7 +210,9 @@ fn chest_model(chest_type: &str) -> &'static str {
         _ => "chest",
     }
 }
-fn skull_layer(kind: &str) -> &'static str {
+/// The head model of a skull `kind`: vanilla's layer, or a native mod's kind, under which the
+/// renderer keeps the head that mod registered (`create_skull_models`).
+fn skull_layer(kind: &str) -> &str {
     match kind {
         "skeleton" => "skeleton",
         "wither_skeleton" => "wither_skeleton",
@@ -197,11 +220,12 @@ fn skull_layer(kind: &str) -> &'static str {
         "creeper" => "creeper",
         "dragon" => "dragon",
         "piglin" => "piglin",
+        mod_kind if mod_kind.contains(':') => mod_kind,
         _ => "player",
     }
 }
-/// `SkullBlockRenderer.SKIN_BY_TYPE`.
-fn skull_texture(kind: &str) -> &'static str {
+/// `SkullBlockRenderer.SKIN_BY_TYPE`, with the kinds native mods registered.
+fn skull_texture<'a>(renderer: &ItemRenderer, kind: &'a str) -> &'a str {
     match kind {
         "skeleton" => "entity/skeleton/skeleton",
         "wither_skeleton" => "entity/skeleton/wither_skeleton",
@@ -209,6 +233,11 @@ fn skull_texture(kind: &str) -> &'static str {
         "creeper" => "entity/creeper/creeper",
         "dragon" => "entity/enderdragon/dragon",
         "piglin" => "entity/piglin/piglin",
+        mod_kind if mod_kind.contains(':') => renderer
+            .skull_textures
+            .get(mod_kind)
+            .copied()
+            .unwrap_or_default(),
         _ => "entity/player/wide/steve",
     }
 }
@@ -426,6 +455,30 @@ pub(super) fn submit_banner_result(
     }
 }
 
+/// `GuiBookModelRenderer.renderToTexture`'s book under `pose`: `BookModel`
+/// set up for `BookModel.State.forAnimation(0, page1, page2, open)`.
+pub(super) fn submit_book(
+    renderer: &ItemRenderer,
+    pose: Mat4,
+    open: f32,
+    page1: f32,
+    page2: f32,
+    sprites: &HashMap<String, Rect>,
+    sink: &mut dyn ItemSink,
+) {
+    let (Some(book), Some(r)) = (
+        renderer.part("book"),
+        sprites
+            .get("entity/enchantment/enchanting_table_book")
+            .copied(),
+    ) else {
+        return;
+    };
+    // forAnimation at time 0: (sin(0) * 0.1 + 1.25) * open.
+    let pose_for = book_pose(1.25 * open, page1, page2);
+    draw(book, "root", pose, &pose_for, r, argb(-1), Foil::None, sink);
+}
+
 /// `SpecialModelRenderer.submit`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn submit(
@@ -499,7 +552,10 @@ pub(super) fn submit(
             let skin = texture
                 .as_deref()
                 .map(|t| format!("entity/{}", t.strip_prefix("minecraft:").unwrap_or(t)))
-                .unwrap_or_else(|| skull_texture(kind).to_owned());
+                .map_or_else(
+                    || std::borrow::Cow::Borrowed(skull_texture(renderer, kind)),
+                    Into::into,
+                );
             part(
                 skull_layer(kind),
                 &skull_pose(kind, *animation),
@@ -513,7 +569,19 @@ pub(super) fn submit(
                 .then(|| host.player_skin(argument))
                 .flatten()
                 .unwrap_or_else(|| "entity/player/slim/steve".to_owned());
-            part("player", &none, &skin, white, Foil::None);
+            // `PlayerHeadSpecialRenderer`: the skin's `entityTranslucent` render type.
+            if let (Some(p), Some(r)) = (renderer.part("player"), sprites.get(&skin).copied()) {
+                draw(
+                    p,
+                    "root",
+                    pose,
+                    &none,
+                    r,
+                    white,
+                    Foil::None,
+                    &mut OitEntity(sink),
+                );
+            }
         }
         SpecialKind::Trident => {
             let foil = if has_foil { Foil::Standard } else { Foil::None };
@@ -707,7 +775,17 @@ mod tests {
         )
         .unwrap();
         let library = crate::model_library::ParsedModels::default().into_item_library();
-        let renderer = ItemRenderer::load_with_library(&root, library).unwrap();
+        let data = crate::test_resources::item_data(
+            &root,
+            horizon_world::native_load_context::DataLoadOrigin::ClientPreload,
+        )
+        .unwrap();
+        let renderer = ItemRenderer::load_with_library(
+            &horizon_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
+            library,
+            &data,
+        )
+        .unwrap();
         let _ = std::fs::remove_dir_all(&root);
         let textures = [
             "entity/shield/shield_base",
@@ -797,7 +875,16 @@ mod tests {
         if !root.join("entity-models.json").exists() {
             return;
         }
-        let renderer = ItemRenderer::load(&root).unwrap();
+        let data = crate::test_resources::item_data(
+            &root,
+            horizon_world::native_load_context::DataLoadOrigin::ClientPreload,
+        )
+        .unwrap();
+        let renderer = ItemRenderer::load(
+            &horizon_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
+            &data,
+        )
+        .unwrap();
         let sprite = Rect {
             u0: 0.25,
             v0: 0.125,

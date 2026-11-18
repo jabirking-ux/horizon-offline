@@ -3,15 +3,26 @@
 //! is mid-tick, preserving damage callbacks and the following timer reset.
 use crate::{
     Result,
-    health::{Attributes, Environment, HealthEvent, HealthResources, HealthRules, State, Updates},
+    health::{
+        Attributes, DamageLevel, Environment, HealthEvent, HealthResources, HealthRules, State,
+        Updates,
+    },
     motion::{MotionEvent, PlayerMotion},
 };
+use horizon_world::native_load_context::LoopContext;
 use horizon_world::{
     food::{Difficulty, FoodData, FoodWorld},
     player_health::{PlayerAttributeHealth, PlayerFloatIds},
     server_player_combat::ServerPlayerCombat,
     synced_floats::SyncedFloats,
 };
+
+/// A living entity is about to heal. Mods may change the amount or cancel.
+/// `entity` identifies the affected entity.
+#[inline(never)]
+pub fn native_living_heal(context: &LoopContext, entity: u32, amount: &mut f32, cancel: &mut bool) {
+    crate::native_client_hooks::living_heal(context, entity, amount, cancel);
+}
 
 impl PlayerMotion {
     /// Player.causeFoodExhaustion: creative and spectator abilities suppress
@@ -25,7 +36,11 @@ impl PlayerMotion {
     /// ServerPlayer.tickRegeneration, dispatched from Player.aiStep before
     /// inventory and living movement. The separately invoked food tick follows
     /// movement in ServerPlayer.doTick.
-    pub fn peaceful_regeneration(&mut self, rules: HealthRules) -> Result<()> {
+    pub fn peaceful_regeneration(
+        &mut self,
+        context: &LoopContext,
+        rules: HealthRules,
+    ) -> Result<()> {
         if rules.difficulty != Difficulty::Peaceful || !rules.natural_regeneration {
             return Ok(());
         }
@@ -33,16 +48,21 @@ impl PlayerMotion {
             let health = self.health.health();
             let maximum = self.attribute("minecraft:max_health")? as f32;
             if health < maximum {
-                let h = &mut self.health;
-                let mut observer = Updates(&mut self.events);
-                PlayerAttributeHealth::new(
-                    &mut self.attributes,
-                    &mut h.data,
-                    h.ids,
-                    h.dead,
-                    &mut observer,
-                )?
-                .heal(1.0)?;
+                let mut amount = 1.0;
+                let mut cancel = false;
+                native_living_heal(context, self.entity_id as u32, &mut amount, &mut cancel);
+                if !cancel {
+                    let h = &mut self.health;
+                    let mut observer = Updates(&mut self.events);
+                    PlayerAttributeHealth::new(
+                        &mut self.attributes,
+                        &mut h.data,
+                        h.ids,
+                        h.dead,
+                        &mut observer,
+                    )?
+                    .heal(amount)?;
+                }
             }
             let saturation = self.health.food.saturation;
             if saturation < 20.0 {
@@ -54,15 +74,28 @@ impl PlayerMotion {
         }
         Ok(())
     }
-    pub fn food_tick(&mut self, resources: &HealthResources, rules: HealthRules) -> Result<()> {
+    /// `FoodData.tick` in `level`, where starvation hurts.
+    pub fn food_tick(
+        &mut self,
+        context: &LoopContext,
+        level: &mut DamageLevel<'_>,
+        resources: &HealthResources,
+        rules: HealthRules,
+    ) -> Result<()> {
         if self.client_side {
             return Ok(());
         }
+        let victim = self.victim();
         let h = &mut self.health;
         let mut world = TickWorld {
+            context,
+            level: level.reborrow(),
+            entity: self.entity_id,
+            victim,
             resources,
             rules,
             invulnerable: self.invulnerable || self.spectator,
+            client_loaded: self.client_loaded,
             attributes: &mut self.attributes,
             data: &mut h.data,
             ids: h.ids,
@@ -72,14 +105,21 @@ impl PlayerMotion {
             sync_velocity: &mut h.sync_velocity,
             game_time: h.game_time,
             events: &mut self.events,
+            status: self.status.clone(),
+            random: &mut self.random,
         };
         h.food.tick(&mut world)
     }
 }
 struct TickWorld<'a> {
+    context: &'a LoopContext,
+    level: DamageLevel<'a>,
+    entity: i32,
+    victim: crate::health::Victim,
     resources: &'a HealthResources,
     rules: HealthRules,
     invulnerable: bool,
+    client_loaded: bool,
     attributes: &'a mut Attributes,
     data: &'a mut SyncedFloats,
     ids: PlayerFloatIds,
@@ -89,6 +129,11 @@ struct TickWorld<'a> {
     sync_velocity: &'a mut bool,
     game_time: i64,
     events: &'a mut Vec<MotionEvent>,
+    /// Resistance, fire resistance and armor protection (effects.rs): the
+    /// starvation hurt is a `LivingEntity.hurtServer` like any other, so its
+    /// `onMobHurt` (Infested) and magic absorb see them.
+    status: crate::effects::StatusFlags,
+    random: &'a mut horizon_core::random::EntityRandom,
 }
 impl FoodWorld for TickWorld<'_> {
     type Error = Box<dyn std::error::Error>;
@@ -113,7 +158,12 @@ impl FoodWorld for TickWorld<'_> {
         )?
         .is_hurt()?)
     }
-    fn heal(&mut self, _: &mut FoodData, amount: f32) -> Result<()> {
+    fn heal(&mut self, _: &mut FoodData, mut amount: f32) -> Result<()> {
+        let mut cancel = false;
+        native_living_heal(self.context, self.entity as u32, &mut amount, &mut cancel);
+        if cancel {
+            return Ok(());
+        }
         let mut observer = Updates(self.events);
         Ok(PlayerAttributeHealth::new(
             self.attributes,
@@ -131,42 +181,57 @@ impl FoodWorld for TickWorld<'_> {
             .expect("validated health field"))
     }
     fn hurt_starvation(&mut self, _: (), food: &mut FoodData, amount: f32) -> Result<()> {
-        // FoodData still ticks after a mode switch with an empty food bar, but
-        // Player.hurtServer rejects starvation for invulnerable abilities.
-        if self.invulnerable {
-            return Ok(());
-        }
         let id = self
             .resources
             .damage
             .id("minecraft:starve")
             .expect("validated starvation source");
-        self.events
-            .push(MotionEvent::Health(HealthEvent::StarvationDamage(amount)));
         let mut environment = Environment {
-            invulnerable: false,
+            level: self.level.reborrow(),
+            invulnerability_checked: None,
+            can_harm_player: true,
+            entity: self.entity,
+            victim: self.victim,
+            causing: 0,
+            invulnerable: self.invulnerable,
+            permanently_invulnerable: false,
+            invulnerable_time: false,
+            creative_source: false,
+            client_loaded: self.client_loaded,
             rules: self.rules,
             source: self
                 .resources
                 .damage
                 .source::<()>(id, None, None, None)
                 .expect("validated starvation source"),
+            weapon: None,
+            random: self.random,
             living_cause: false,
             events: self.events,
             dead: self.dead,
             sync_velocity: self.sync_velocity,
             game_time: self.game_time,
-            status: Default::default(),
+            status: self.status.clone(),
+            helmet: false,
             blocking: None,
             blocked: 0.0,
+            shield_damage: 0,
+            blocking_item_used: false,
+            fully_blocked: false,
             block_sound: false,
             knocked: false,
             totem: false,
+            totem_off_hand: false,
             totem_fired: false,
+            canceled: false,
+            dealt: 0.0,
         };
         if ServerPlayerCombat::new(self.attributes, self.data, food, self.ids, &mut environment)?
             .hurt(self.hurt, amount)?
         {
+            environment
+                .events
+                .push(MotionEvent::Health(HealthEvent::StarvationDamage(amount)));
             *self.hurt_animation_time = self.hurt.hurt_time;
         }
         Ok(())

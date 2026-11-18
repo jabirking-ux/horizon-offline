@@ -3,11 +3,11 @@
 //! without asking the profile service again. Each entry expires a month after
 //! it was added; the file keeps the 1000 most recently used.
 use crate::{
-    java_properties::{civil_from_days, days_from_civil, now_millis},
     json::{self, Json},
     profiles::valid_player_name,
-    user_lists::{NameAndId, format_date, parse_date},
+    user_lists::{NameAndId, format_date, parse_date, read_utf8},
 };
+use horizon_java_properties::{civil_from_days, days_from_civil, now_millis};
 use std::{collections::HashMap, path::PathBuf};
 
 const MRU_LIMIT: usize = 1000;
@@ -19,7 +19,7 @@ struct Info {
     last_access: u64,
 }
 
-/// `Calendar.add(MONTH, 1)` on a UTC time: the same day and time a month
+/// Adding one month on a UTC time: the same day and time a month
 /// later, the day clamped to the end of a shorter month.
 pub fn one_month_later(millis: i64) -> i64 {
     let days = millis.div_euclid(86_400_000);
@@ -60,7 +60,7 @@ impl UserCache {
             resolve_offline_users: true,
         };
         let mut warnings = Vec::new();
-        let entries = match std::fs::read_to_string(&cache.file) {
+        let entries = match read_utf8(&cache.file) {
             Ok(text) => cache.parse(&text, &mut warnings),
             Err(_) => Vec::new(),
         };
@@ -130,6 +130,21 @@ impl UserCache {
         });
         self.save();
         self.infos[index].user.clone()
+    }
+
+    /// `get(UUID)`: the player with this id, if cached (expired or not, as vanilla's).
+    pub fn get_by_id(&mut self, id: u128) -> Option<NameAndId> {
+        let index = *self.by_uuid.get(&id)?;
+        self.operations += 1;
+        self.infos[index].last_access = self.operations;
+        Some(self.infos[index].user.clone())
+    }
+
+    /// The player with this name (any case) while their entry hasn't expired: `get(String)` without
+    /// the lookup, the offline player and any change to the cache.
+    pub fn find_by_name(&self, name: &str) -> Option<NameAndId> {
+        let info = &self.infos[*self.by_name.get(&name.to_lowercase())?];
+        (now_millis() < info.expires).then(|| info.user.clone())
     }
 
     /// `get(String)`: the player with this name (any case). An expired entry is
@@ -266,6 +281,43 @@ mod tests {
         );
     }
 
+    /// `CachedUserNameToIdResolver.load` reads through the same UTF-8 reader as the lists: a byte that is
+    /// not UTF-8 becomes U+FFFD and the rest of the cache stays.
+    #[test]
+    fn a_byte_that_is_not_utf8_is_replaced_not_a_missing_cache() {
+        let dir =
+            std::env::temp_dir().join(format!("horizon-usercache-latin1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("usercache.json");
+        let mut bytes = br#"[{"uuid":"069a79f4-44e9-4726-a5be-fca90e38aaf5","name":"Caf"#.to_vec();
+        bytes.extend(b"\xE9\",\"expiresOn\":\"2099-01-01 00:00:00 +0000\"}]");
+        std::fs::write(&file, &bytes).unwrap();
+        let (c, warnings) = UserCache::load(&file);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            c.find_by_name("Caf\u{fffd}").map(|u| u.name),
+            Some("Caf\u{fffd}".into())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_by_name_only_reads() {
+        let (c, _) = cache(
+            r#"[{"uuid":"069a79f4-44e9-4726-a5be-fca90e38aaf5","name":"Notch","expiresOn":"2099-01-01 00:00:00 +0000"},
+                {"uuid":"61699b2e-d327-4a01-9f1e-0ea8c3f06bc6","name":"Expired","expiresOn":"2000-01-01 00:00:00 +0000"}]"#,
+        );
+        let before = c.to_json();
+        assert_eq!(
+            c.find_by_name("nOtCh").map(|u| u.name),
+            Some("Notch".into())
+        );
+        // An expired entry, an unknown name: nothing, and no offline player made up.
+        assert_eq!(c.find_by_name("Expired"), None);
+        assert_eq!(c.find_by_name("Nobody"), None);
+        assert_eq!(c.to_json(), before);
+    }
+
     #[test]
     fn names_resolve_through_the_cache() {
         let (mut c, _) = cache(
@@ -277,6 +329,15 @@ mod tests {
         // A hit in any case, and it becomes the most recent.
         let notch = c.get_by_name_at("NOTCH", now, never).unwrap();
         assert_eq!(notch.name, "Notch");
+        // By id: what the cache holds, expired or not (vanilla's `get(UUID)` doesn't check).
+        assert_eq!(c.get_by_id(notch.id), Some(notch.clone()));
+        assert_eq!(
+            c.get_by_id(0x61699b2e_d327_4a01_9f1e_0ea8c3f06bc6)
+                .unwrap()
+                .name,
+            "Old"
+        );
+        assert_eq!(c.get_by_id(1), None);
         // Expired: dropped and looked up again, by its lower-case name.
         let mut asked = Vec::new();
         let old = c

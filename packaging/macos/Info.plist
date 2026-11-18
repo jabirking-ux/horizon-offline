@@ -26,10 +26,14 @@
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.games</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>11.0</string>
+	<string>12.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
+<<<<<<< HEAD
 	<string>Horizon Offline is MIT licensed. Not an official Minecraft product; not approved by or associated with Mojang or Microsoft.</string>
+=======
+	<string>Horizon Offline is MIT licensed. Not an official Minecraft product; not approved by or associated with Mojang or Microsoft.</string>
+>>>>>>> upstream/main
 </dict>
 </plist>

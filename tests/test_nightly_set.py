@@ -1,22 +1,34 @@
+import json
 import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tools.ci import nightly_set as ns
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = "2026-10-28T12:00:00+00:00"
-TEAM = {"kacpherek", "rdbtcvs", "online5277", "levzzz5154"}
 PATTERNS = ns.guarded_patterns((ROOT / ".github/CODEOWNERS").read_text())
+# Fixture accounts: the decision is by numeric ID, so each test login has one. Ludovic's real ID may not be filled in
+# yet (tools/ci/resolve_reviewer_ids.py), so tests use their own unless it is.
+LUDOVIC_ID = ns.OWNER_ID or 1
+ns.OWNER_ID = LUDOVIC_ID
+IDS = {"ludovic111": LUDOVIC_ID, "kacpherek": 101, "rdbtcvs": 102, "levzzz5154": 104}
 
 
-def pr(n, head="h", state="open", files=("crates/horizon-world/src/lib.rs",), base="main", approved_by=("rdbtcvs",),
-       approved_at=None):
-    sha = f"{head}{n}"
-    return ns.PullRequest(n, state, sha, f"Fix {n}", f"dev{n}", base, list(files),
-                          {who: approved_at or sha for who in approved_by})
+def actor(login):
+    return ns.Actor(login, IDS.get(login.lower(), 9999))
+
+
+def listing(*lines):
+    """A reviewers file: `kacpherek` becomes `101 kacpherek`; other lines stay as written."""
+    return ns.read_reviewers("".join((f"{IDS[l.lower()]} {l}" if l.lower() in IDS else l) + "\n" for l in lines))
+
+
+def pr(n, head="h", state="open", files=("crates/horizon-world/src/lib.rs",), base="main"):
+    return ns.PullRequest(n, state, f"{head}{n}", f"Fix {n}", f"dev{n}", base, list(files))
 
 
 def lookup(*prs):
@@ -25,30 +37,54 @@ def lookup(*prs):
 
 
 def run(state, text, login="kacpherek", *prs):
-    return ns.apply(state, ns.parse(text), login, NOW, lookup(*prs), PATTERNS, TEAM)
+    return ns.apply(state, ns.parse(text), actor(login), NOW, lookup(*prs), PATTERNS)
 
 
-class ApprovalTests(unittest.TestCase):
-    """A Nightly reaches every player: only pull requests the Team or Ludovic's agents approved at that head."""
+class CommandTests(unittest.TestCase):
+    """command(), as nightly-command.yml runs it: the comment in the environment, the answer posted back."""
 
-    def test_an_unreviewed_pull_request_is_refused(self):
-        with self.assertRaisesRegex(ns.Refused, "no approving review"):
-            run({}, "/nightly add 1", "kacpherek", pr(1, approved_by=()))
+    def run_command(self, body, author=ns.OWNER):
+        answers = []
+        env = {"GITHUB_REPOSITORY": "horizon-rust/horizon", "ISSUE": "1", "AUTHOR": author,
+               "AUTHOR_ID": str(IDS.get(author.lower(), 9999)), "BODY": body, "COMMENT_URL": "", "GH_TOKEN": "token"}
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(ns, "load_state", return_value=({"prs": [], "blocked": []}, "", None)), \
+                mock.patch.object(ns, "lookup", return_value=lookup()), \
+                mock.patch.object(ns, "answer", lambda repo, issue, text: answers.append(text)):
+            ns.command()
+        return answers
 
-    def test_the_authors_own_approval_and_outsiders_dont_count(self):
-        with self.assertRaisesRegex(ns.Refused, "no approving review"):
-            run({}, "/nightly add 1", "kacpherek", pr(1, approved_by=("dev1", "someone")))
+    def test_status_reaches_an_answer(self):
+        # Until 2026-11-05 command() passed apply() a seventh argument it no longer takes, so every /nightly,
+        # status included, ended in TypeError and nobody got an answer.
+        answers = self.run_command("/nightly status")
+        self.assertEqual(len(answers), 1)
+        self.assertEqual(answers, ["The set is empty: the Nightly is main alone."])
 
-    def test_ludovics_agents_and_the_team_count(self):
-        for who in ("ludovic111", "levzzz5154"):
-            self.assertEqual(run({}, "/nightly add 1", "kacpherek", pr(1, approved_by=(who,))).state["prs"][0]["number"], 1)
 
-    def test_an_approval_on_an_older_head_doesnt_count(self):
-        with self.assertRaisesRegex(ns.Refused, "no approving review"):
-            run({}, "/nightly add 1", "kacpherek", pr(1, approved_at="old1"))
+class NoReviewNeededTests(unittest.TestCase):
+    """Ludovic, 2026-10-30, at the Team's request: a Nightly takes any open pull request to main, reviewed or not."""
 
-    def test_a_dry_run_needs_no_approval(self):
-        self.assertTrue(run({}, "/nightly dry-run 1", "kacpherek", pr(1, approved_by=())).dry_run)
+    def test_an_unreviewed_pull_request_is_accepted(self):
+        for text in ("/nightly add 1", "/nightly 1", "/nightly dry-run 1"):
+            result = run({}, text, "kacpherek", pr(1))
+            self.assertTrue(result.build, text)
+        self.assertEqual(run({}, "/nightly add 1", "kacpherek", pr(1)).state["prs"][0]["head"], "h1")
+
+    def test_a_guarded_file_is_still_refused(self):
+        for text in ("/nightly add 1", "/nightly dry-run 1"):
+            with self.assertRaisesRegex(ns.Refused, "only the council merges"):
+                run({}, text, "kacpherek", pr(1, files=["crates/horizon-world/src/lib.rs", ".github/CODEOWNERS"]))
+
+    def test_the_other_guards_stay(self):
+        with self.assertRaisesRegex(ns.Refused, "not main"):
+            run({}, "/nightly add 1", "kacpherek", pr(1, base="release"))
+        with self.assertRaisesRegex(ns.Refused, "is closed"):
+            run({}, "/nightly add 1", "kacpherek", pr(1, state="closed"))
+        with self.assertRaises(ns.Refused):  # who may ask is checked before the set changes (command())
+            ns.authorize(actor("someone"), listing("kacpherek"))
+        with self.assertRaises(ns.Refused):
+            ns.authorize(actor("kacpherek"), listing("kacpherek", "paused"))
 
 
 class ParseTests(unittest.TestCase):
@@ -80,28 +116,102 @@ class ParseTests(unittest.TestCase):
 
 
 class AllowTests(unittest.TestCase):
-    LIST = "# trusted\nkacpherek   # added by Ludovic\nrdbtCVS\n\nnot a login!\n"
+    LIST = "# trusted\n101 kacpherek   # added by Ludovic\n102 rdbtCVS\n\nnot a login!\n"
 
     def test_listed_reviewers_and_ludovic(self):
         reviewers = ns.read_reviewers(self.LIST)
-        ns.authorize("kacpherek", reviewers)
-        ns.authorize("RDBTcvs", reviewers)
-        ns.authorize("ludovic111", reviewers)
+        ns.authorize(actor("kacpherek"), reviewers)
+        ns.authorize(actor("RDBTcvs"), reviewers)
+        ns.authorize(actor("ludovic111"), reviewers)
         for login in ("levzzz5154", "someone", "not"):
             with self.assertRaises(ns.Refused):
-                ns.authorize(login, reviewers)
+                ns.authorize(actor(login), reviewers)
+
+    def test_the_id_decides_not_the_login(self):
+        reviewers = ns.read_reviewers(self.LIST)
+        # Someone who claimed a listed login after a rename: same name, another account.
+        with self.assertRaises(ns.Refused):
+            ns.authorize(ns.Actor("kacpherek", 555), reviewers)
+        with self.assertRaises(ns.Refused):
+            ns.authorize(ns.Actor("ludovic111", 556), reviewers)
+        # The listed account under a new name keeps its access.
+        ns.authorize(ns.Actor("kacper-renamed", 101), reviewers)
+        ns.authorize(ns.Actor("new-name", LUDOVIC_ID), reviewers)
+
+    def test_old_format_lines_grant_nothing(self):
+        reviewers = ns.read_reviewers("kacpherek\n101\n101 kacpherek extra\n0 zero\n")
+        self.assertEqual(reviewers.members, {})
+        self.assertEqual(len(reviewers.skipped), 4)
+        with self.assertRaises(ns.Refused):
+            ns.authorize(actor("kacpherek"), reviewers)
+
+    def test_no_owner_id_and_no_council_means_no_owner(self):
+        saved = ns.OWNER_ID, ns.COUNCIL_IDS
+        try:
+            ns.OWNER_ID, ns.COUNCIL_IDS = None, frozenset()
+            self.assertFalse(ns.is_owner(ns.Actor("ludovic111", LUDOVIC_ID)))
+            self.assertFalse(ns.is_owner_id(None))
+        finally:
+            ns.OWNER_ID, ns.COUNCIL_IDS = saved
+
+    def test_every_council_member_holds_the_owner_powers(self):
+        council = ns.read_council("# the council\n54669067 kacpherek  # a note\nnot-an-id someone\nrdbtCVS\n12 a b\n")
+        self.assertEqual(council, frozenset({54669067}), "only `<id> <login>` lines count")
+        saved = ns.COUNCIL_IDS
+        try:
+            ns.COUNCIL_IDS = council
+            member = ns.Actor("kacpherek", 54669067)
+            self.assertTrue(ns.is_owner(member))
+            paused = ns.read_reviewers("paused\n")
+            ns.authorize(member, paused)  # a council member isn't stopped by the reviewers' pause
+            with self.assertRaises(ns.Refused):
+                ns.authorize(ns.Actor("kacpherek-imposter", 54669068), paused)
+        finally:
+            ns.COUNCIL_IDS = saved
+
+    def test_the_council_file_on_main_reads_whole(self):
+        text = (ROOT / ns.COUNCIL).read_text()
+        lines = [line for line in text.splitlines() if line.split("#", 1)[0].strip()]
+        self.assertEqual(len(ns.read_council(text)), len(lines), "every member line is `<id> <login>`")
+        self.assertEqual(ns.COUNCIL_IDS, ns.read_council(text))
+
+    def test_the_commands_workflows_fetch_the_council_file(self):
+        # They check out main sparsely: a file left out of the list reads as missing, and the council loses its powers.
+        for name in ("nightly-command", "triage-command", "claim-command"):
+            text = (ROOT / ".github" / "workflows" / f"{name}.yml").read_text()
+            checkout = text[text.index("sparse-checkout: |"):text.index("sparse-checkout-cone-mode")]
+            self.assertIn(ns.COUNCIL, checkout, name)
 
     def test_paused_stops_reviewers_not_ludovic(self):
         reviewers = ns.read_reviewers(self.LIST + "paused  # Ludovic, 2026-10-29\n")
         self.assertTrue(reviewers.paused)
         with self.assertRaises(ns.Refused):
-            ns.authorize("kacpherek", reviewers)
-        ns.authorize("ludovic111", reviewers)
+            ns.authorize(actor("kacpherek"), reviewers)
+        ns.authorize(actor("ludovic111"), reviewers)
 
-    def test_the_repos_list_names_the_three_reviewers(self):
+    def test_the_author_id_comes_from_the_workflow(self):
+        self.assertEqual(ns.actor_from_env({"AUTHOR": "kacpherek", "AUTHOR_ID": "101"}), ns.Actor("kacpherek", 101))
+        for env in ({"AUTHOR": "kacpherek"}, {"AUTHOR": "kacpherek", "AUTHOR_ID": ""},
+                    {"AUTHOR": "kacpherek", "AUTHOR_ID": "kacpherek"}, {"AUTHOR": "x", "AUTHOR_ID": "-1"}):
+            with self.assertRaises(ns.Refused):
+                ns.actor_from_env(env)
+
+    def test_the_repos_list_names_its_reviewers_by_id(self):
+        """Fails until tools/ci/resolve_reviewer_ids.py has filled in the IDs: until then no reviewer has access."""
         reviewers = ns.read_reviewers((ROOT / ns.REVIEWERS).read_text())
+        self.assertEqual(reviewers.skipped, [])
         self.assertEqual(reviewers.logins, {"kacpherek", "rdbtcvs", "online5277", "levzzz5154"})
         self.assertFalse(reviewers.paused)
+        source = (ROOT / "tools/ci/nightly_set.py").read_text()
+        self.assertRegex(source, r"(?m)^OWNER_ID: int \| None = [1-9][0-9]*$")
+
+
+class WorkflowIdTests(unittest.TestCase):
+    def test_every_command_workflow_passes_the_authors_id(self):
+        for name in ("nightly-command.yml", "triage-command.yml", "claim-command.yml"):
+            text = (ROOT / ".github/workflows" / name).read_text()
+            self.assertIn("AUTHOR_ID: ${{ github.event.comment.user.id }}", text, name)
+
 
 class RefusalTests(unittest.TestCase):
     def test_what_codeowners_guards_is_refused(self):
@@ -113,6 +223,79 @@ class RefusalTests(unittest.TestCase):
                      "crates/horizon-server/src/main.rs"):
             self.assertFalse(ns.guarded(path, PATTERNS), path)
         self.assertTrue(ns.guarded("tools/ci/x.py", ns.guarded_patterns("")))  # even without CODEOWNERS
+
+    def test_wildcard_and_slashless_directory_patterns_guard_descendants(self):
+        patterns = ns.guarded_patterns('/packages/** @council\n/council-only @council\n/scripts/*.py @council\n')
+        self.assertTrue(ns.guarded('packages/x/y.rs', patterns))
+        self.assertTrue(ns.guarded('council-only/notes/x.md', patterns))
+        self.assertTrue(ns.guarded('scripts/task.py', patterns))
+        self.assertFalse(ns.guarded('scripts/task.txt', patterns))
+        self.assertFalse(ns.guarded('scripts/task.py\n', patterns))
+        self.assertFalse(ns.guarded('packages-dev/x.rs', patterns))
+        self.assertFalse(ns.guarded('council-only-other/x.md', patterns))
+
+    def test_wildcard_folder_patterns_guard_every_file_under_them(self):
+        patterns = ns.guarded_patterns('/packages/*/ @council\n/packages/**/x.rs @council\n')
+        self.assertTrue(ns.guarded('packages/x/a.rs', patterns))
+        self.assertTrue(ns.guarded('packages/x.rs', patterns))  # **/ matches zero folders
+        self.assertTrue(ns.guarded('packages/a/b/x.rs', patterns))
+        self.assertTrue(ns.guarded('packages/line\nname/x.rs', patterns))
+        self.assertFalse(ns.guarded('other/x/a.rs', patterns))  # negative control
+        self.assertFalse(ns.guarded('other/x/y/a.rs', patterns))  # the folder must be under packages/
+
+    def test_terminal_star_differs_from_an_explicit_directory_rule(self):
+        patterns = ns.guarded_patterns('docs/* @council\n')
+        self.assertTrue(ns.guarded('docs/getting-started.md', patterns))
+        self.assertFalse(ns.guarded('docs/build-app/troubleshooting.md', patterns))
+        self.assertTrue(ns.guarded('docs/build-app/troubleshooting.md',
+                                   ns.guarded_patterns('docs/*/ @council\n')))
+        self.assertTrue(ns.guarded('nested/logs/today.txt',
+                                   ns.guarded_patterns('**/logs @council\n')))
+        self.assertTrue(ns.guarded('nested/line\nname/logs/today.txt',
+                                   ns.guarded_patterns('**/logs @council\n')))
+
+    def test_unrooted_codeowners_rules_guard_at_their_path_scope(self):
+        cases = (
+            ('owned', ('owned', 'owned/a.txt', 'nested/owned/a.txt'),
+             ('owned-other/a.txt', 'nested/owned-other/a.txt')),
+            ('owned/', ('owned/a.txt', 'nested/owned/a.txt'),
+             ('owned', 'owned-other/a.txt')),
+            ('*.rs', ('a.rs', 'nested/a.rs', 'nested/a.rs/notes.txt'),
+             ('a.rs.bak', 'nested/a.txt')),
+            ('packages/*/', ('packages/a/x.txt', 'packages/a/nested/x.txt'),
+             ('nested/packages/a/x.txt', 'packages-other/a/x.txt')),
+            ('shared/owned', ('shared/owned', 'shared/owned/a.txt'),
+             ('nested/shared/owned/a.txt', 'shared/owned-other/a.txt')),
+            ('/owned', ('owned', 'owned/a.txt'),
+             ('nested/owned/a.txt', 'owned-other/a.txt')),
+        )
+        for rule, guarded, unguarded in cases:
+            with self.subTest(rule=rule):
+                patterns = ns.guarded_patterns(f'# ignored @council\n\n  {rule} @council\n')
+                for path in guarded:
+                    self.assertTrue(ns.guarded(path, patterns), path)
+                for path in unguarded:
+                    self.assertFalse(ns.guarded(path, patterns), path)
+                self.assertFalse(ns.guarded('#/notes.txt', patterns))
+
+    def test_lookup_preserves_paginated_and_renamed_paths_for_the_guard(self):
+        pages = [[{"filename": "unowned/readme.txt", "previous_filename": "packages/line\nname.rs"}],
+                 [{"filename": "packages/café.rs"}, {"filename": "unowned/café.rs"}]]
+        paths = ["unowned/readme.txt", "packages/line\nname.rs", "packages/café.rs", "unowned/café.rs"]
+
+        def gh(*args, **kwargs):
+            if args[1] == "repos/owner/repo/pulls/123":
+                return json.dumps({"state": "open", "head": {"sha": "a" * 40}, "title": "paths",
+                                   "user": {"login": "dev"}, "base": {"ref": "main"}})
+            return "\n".join(paths) if "--jq" in args else json.dumps(pages)
+
+        with mock.patch.object(ns, "gh", gh):
+            candidate = ns.lookup("owner/repo")(123)
+        self.assertEqual(candidate.files, paths)
+        patterns = ns.guarded_patterns("/packages/*.rs @council\n")
+        self.assertIn("only the council merges", ns.check(candidate, 123, patterns))
+        self.assertIsNone(ns.check(pr(124, files=["unowned/café.rs"]), 124, patterns))
+
 
     def test_a_set_with_a_refused_pull_request_changes_nothing(self):
         state = {"prs": []}
@@ -245,6 +428,24 @@ class AssemblyTests(unittest.TestCase):
 
     def test_changed_files_finds_guarded_paths(self):
         self.assertEqual(sorted(ns.changed_files(self.main, self.p2, cwd=self.repo)), [".gitattributes", "b.txt"])
+
+    def test_changed_files_preserves_repository_paths_for_the_guard(self):
+        # Git's display quoting and text/newline decoding must not change the paths
+        # the guard sees. Include an unrelated file to control the guard's scope.
+        paths = ("packages/café.rs", "packages/ space .rs", "unowned/café.rs")
+        if os.name != "nt":
+            paths += ("packages/tab\tname.rs", "packages/line\nname.rs", "packages/carriage\rname.rs",
+                      os.fsdecode(b"packages/invalid-\xff.rs"))
+        for path in paths:
+            target = Path(self.repo, path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("new\n")
+        head = self.commit("paths Git would quote")
+        changed = ns.changed_files(self.main, head, cwd=self.repo)
+        self.assertCountEqual(changed, paths)
+        patterns = ns.guarded_patterns("/packages/*.rs @council\n")
+        for path in changed:
+            self.assertEqual(ns.guarded(path, patterns), path.startswith("packages/"), path)
 
 
 class StateTests(unittest.TestCase):

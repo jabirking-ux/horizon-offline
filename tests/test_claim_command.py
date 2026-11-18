@@ -7,11 +7,30 @@ from tools.ci import nightly_set as ns
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 10, 29, 12, tzinfo=timezone.utc)
-LIST = ns.read_reviewers("kacpherek\nrdbtCVS\n")
+# Fixture accounts: the decision is by numeric ID, so each test login has one. Ludovic's real ID may not be filled in
+# yet (tools/ci/resolve_reviewer_ids.py), so tests use their own unless it is.
+LUDOVIC_ID = ns.OWNER_ID or 1
+ns.OWNER_ID = LUDOVIC_ID
+cc.ns.OWNER_ID = LUDOVIC_ID  # the script's own import of nightly_set
+IDS = {"ludovic111": LUDOVIC_ID, "kacpherek": 101, "rdbtcvs": 102, "levzzz5154": 104}
 
 
-def thread(state="open", holders=(), pr=False, locked=False):
-    t = {"state": state, "assignees": [{"login": h} for h in holders], "locked": locked}
+def actor(login):
+    return ns.Actor(login, IDS.get(login.lower(), 9999))
+
+
+def listing(*lines):
+    """A reviewers file: `kacpherek` becomes `101 kacpherek`; other lines stay as written."""
+    return ns.read_reviewers("".join((f"{IDS[l.lower()]} {l}" if l.lower() in IDS else l) + "\n" for l in lines))
+
+
+LIST = listing("kacpherek", "rdbtCVS")
+
+
+def thread(state="open", holders=(), pr=False, locked=False, author="filer", age=timedelta(days=1), bot=False):
+    t = {"state": state, "assignees": [{"login": h} for h in holders], "locked": locked,
+         "user": {"login": author, "type": "Bot" if bot else "User"},
+         "created_at": (NOW - age).strftime("%Y-%m-%dT%H:%M:%SZ")}
     if pr:
         t["pull_request"] = {"merged_at": None}
     return t
@@ -41,7 +60,7 @@ class Fake:
 
 def do(text, api=None, login="newcomer", reviewers=LIST, n=5):
     api = api or Fake()
-    return cc.run(api, cc.parse(text), login, n, reviewers), api
+    return cc.run(api, cc.parse(text), actor(login), n, reviewers, NOW), api
 
 
 class ParseTests(unittest.TestCase):
@@ -83,6 +102,15 @@ class ClaimTests(unittest.TestCase):
             do("/claim", api)
         self.assertEqual(api.calls, [])
 
+    def test_trackers_and_proposals_are_not_claimed(self):
+        for name in ("Tracker", "proposal", "not claimable"):
+            t = thread()
+            t["labels"] = [{"name": "bug"}, {"name": name}]
+            api = Fake({5: t})
+            with self.assertRaisesRegex(cc.Refused, "isn't claimed as a whole"):
+                do("/claim", api)
+            self.assertEqual(api.calls, [], name)
+
     def test_already_yours(self):
         with self.assertRaisesRegex(cc.Refused, "already hold"):
             do("/claim", Fake({5: thread(holders=("NewComer",))}))
@@ -98,7 +126,7 @@ class ClaimTests(unittest.TestCase):
 
     def test_five_claims_at_most(self):
         api = Fake(claims=cc.MAX_CLAIMS)
-        with self.assertRaisesRegex(cc.Refused, "5 open issues"):
+        with self.assertRaisesRegex(cc.Refused, "8 open issues"):
             do("/claim", api)
         self.assertEqual(api.calls, [])
         do("/claim", Fake(claims=cc.MAX_CLAIMS - 1))
@@ -107,11 +135,39 @@ class ClaimTests(unittest.TestCase):
         do("/claim", Fake(claims=50), login="ludovic111")
         do("/claim", Fake(claims=50), login="RdbtCVS")
         with self.assertRaises(cc.Refused):
-            do("/claim", Fake(claims=50), login="rdbtCVS", reviewers=ns.read_reviewers("rdbtCVS\npaused\n"))
+            do("/claim", Fake(claims=50), login="rdbtCVS", reviewers=listing("rdbtCVS", "paused"))
 
     def test_github_dropped_the_assignee(self):
         with self.assertRaisesRegex(cc.Refused, "didn't assign"):
             do("/claim", Fake(assignable=False))
+
+
+class GraceTests(unittest.TestCase):
+    def test_non_author_is_refused_inside_the_window(self):
+        api = Fake({5: thread(age=timedelta(minutes=2))})
+        with self.assertRaises(cc.Refused):
+            do("/claim", api)
+        with self.assertRaises(cc.Refused):
+            do("/claim", Fake({5: thread(age=timedelta(minutes=59))}), login="ludovic111")
+        self.assertEqual(api.calls, [])
+
+    def test_refusal_text(self):
+        with self.assertRaises(cc.Refused) as e:
+            do("/claim", Fake({5: thread(age=timedelta(minutes=2))}))
+        self.assertEqual(str(e.exception), "@filer filed this issue 2 minutes ago: they have the first hour to claim it "
+                                           "(until 12:58 UTC).")
+
+    def test_author_claims_inside_the_window(self):
+        text, api = do("/claim", Fake({5: thread(age=timedelta(minutes=2))}), login="Filer")
+        self.assertIsNone(text)
+        self.assertEqual(api.calls, [("assign", 5, "Filer")])
+
+    def test_anyone_claims_after_the_window(self):
+        do("/claim", Fake({5: thread(age=cc.AUTHOR_GRACE)}))
+
+    def test_bot_filed_issues_have_no_window(self):
+        do("/claim", Fake({5: thread(age=timedelta(seconds=5), bot=True)}))
+        do("/claim", Fake({5: thread(age=timedelta(seconds=5), author="kira-horizon[bot]")}))
 
 
 class UnclaimTests(unittest.TestCase):
@@ -173,6 +229,12 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(cc.stale_claims(node(events=[assigned("dev", 9), mentioned("CLOSED")]), NOW), ["dev"])
         self.assertEqual(cc.stale_claims(node(events=[assigned("dev", 9), {"__typename": "CrossReferencedEvent",
                                                                           "source": {}}]), NOW), ["dev"])
+
+    def test_a_saturated_timeline_window_keeps_the_claim(self):
+        # With `last: 100`, an open PR link older than the newest 100 events is invisible. Keep the claim
+        # rather than unassigning a contributor whose protection we cannot see.
+        full = [assigned("other", 1) for _ in range(cc.TIMELINE_WINDOW)]
+        self.assertEqual(cc.stale_claims(node(events=[assigned("dev", 6), *full]), NOW), [])
 
     def test_release_unassigns_and_says_why(self):
         class Api(Fake):

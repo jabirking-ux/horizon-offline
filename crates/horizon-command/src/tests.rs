@@ -94,6 +94,124 @@ fn suggestions(input: &str) -> Vec<String> {
 }
 
 #[test]
+fn execution_requirement_keeps_public_children_reachable() {
+    let mut dispatcher = Dispatcher::new();
+    let root = dispatcher.literal(0, "foo");
+    dispatcher.executes(root, "admin");
+    dispatcher.requires_execution(root, 4);
+    let child = dispatcher.literal(root, "bar");
+    dispatcher.executes(child, "public");
+    let registries = Registries::default();
+    let denied = dispatcher.parse("foo", &registries);
+    assert!(!denied.is_valid());
+    assert!(denied.executable().is_err());
+    assert_eq!(
+        dispatcher
+            .parse("foo bar", &registries)
+            .executable()
+            .unwrap()
+            .1,
+        "public"
+    );
+    let operator = Registries {
+        permission: 4,
+        ..registries
+    };
+    assert_eq!(
+        dispatcher.parse("foo", &operator).executable().unwrap().1,
+        "admin"
+    );
+    dispatcher.requires(root, 4);
+    assert!(
+        dispatcher
+            .parse("foo bar", &Registries::default())
+            .executable()
+            .is_err()
+    );
+}
+
+#[test]
+fn authorized_argument_alternatives_win_only_complete_ties() {
+    for reverse in [false, true] {
+        let mut dispatcher = Dispatcher::new();
+        let root = dispatcher.literal(0, "foo");
+        let first_word = reverse.then(|| dispatcher.argument(root, "b", ArgType::Word));
+        let integer = dispatcher.argument(root, "a", integer(i32::MIN));
+        dispatcher.executes(integer, "admin");
+        dispatcher.requires_execution(integer, 4);
+        let bar = dispatcher.literal(integer, "bar");
+        dispatcher.executes(bar, "child");
+        let word = first_word.unwrap_or_else(|| dispatcher.argument(root, "b", ArgType::Word));
+        dispatcher.executes(word, "public");
+        for permission in 0..=4 {
+            let registries = Registries {
+                permission,
+                ..Registries::default()
+            };
+            let parsed = dispatcher.parse("foo 7", &registries);
+            let (context, command) = parsed.executable().unwrap();
+            let admin = permission == 4 && !reverse;
+            assert_eq!(command, if admin { "admin" } else { "public" });
+            assert_eq!(context.get("a").is_some(), admin);
+            assert_eq!(
+                dispatcher
+                    .parse("foo 7 bar", &registries)
+                    .executable()
+                    .unwrap()
+                    .1,
+                "child"
+            );
+            assert!(dispatcher.parse("foo", &registries).executable().is_err());
+        }
+        let registries = Registries::default();
+        // A nonmatching literal is not tried; use failing argument parsers to
+        // exercise error ordering independently of the complete-tie case.
+        let tail = dispatcher.argument(integer, "tail", ArgType::Bool);
+        dispatcher.executes(tail, "integer_child");
+        let unread = dispatcher.parse("foo 7 nope", &registries);
+        assert!(unread.can_read());
+        assert!(unread.errors.is_empty());
+        assert!(
+            unread.context.get("b").is_some(),
+            "the error-free peer wins"
+        );
+        let tail = dispatcher.argument(word, "tail", ArgType::Bool);
+        dispatcher.executes(tail, "word_child");
+        let failed = dispatcher.parse("foo 7 nope", &registries);
+        assert!(failed.can_read() && !failed.errors.is_empty());
+        assert_eq!(
+            failed.context.get("b").is_some(),
+            reverse,
+            "invalid ties stay stable"
+        );
+        let literal = dispatcher.literal(root, "7");
+        dispatcher.executes(literal, "literal");
+        assert_eq!(
+            dispatcher
+                .parse("foo 7", &registries)
+                .executable()
+                .unwrap()
+                .1,
+            "literal"
+        );
+    }
+    let mut dispatcher = Dispatcher::new();
+    let root = dispatcher.literal(0, "foo");
+    let integer = dispatcher.argument(root, "a", integer(i32::MIN));
+    dispatcher.executes(integer, "admin");
+    dispatcher.requires_execution(integer, 4);
+    let bar = dispatcher.literal(integer, "bar");
+    dispatcher.executes(bar, "public");
+    assert!(
+        dispatcher
+            .parse("foo 7", &Registries::default())
+            .executable()
+            .is_err(),
+        "no authorized alternative must still refuse"
+    );
+}
+
+#[test]
 fn reader_matches_brigadier() {
     let mut r = Reader::new("12 -3.5 abc \"q\\\"x\" true");
     assert_eq!(r.read_int().unwrap(), 12);
@@ -109,6 +227,107 @@ fn reader_matches_brigadier() {
     assert_eq!(e.message.plain(), "parsing.int.invalid");
     assert_eq!(e.context().unwrap(), "<--[HERE]");
 }
+
+#[test]
+fn resource_selector_wildcards_preserve_unicode_and_backtracking() {
+    let cases = [
+        ("minecraft:stone", "minecraft:*", true),
+        ("minecraft:stone", "minecraft:s?one", true),
+        ("minecraft:stone", "minecraft:s?on", false),
+        ("éclair", "?clair", true),
+        ("éclair", "??clair", false),
+        ("abc", "a**c", true),
+        ("abc", "*b*", true),
+        ("", "*", true),
+        ("", "?", false),
+    ];
+    for (text, pattern, expected) in cases {
+        assert_eq!(
+            wildcard_match(text, pattern),
+            expected,
+            "{text:?} vs {pattern:?}"
+        );
+    }
+}
+
+#[test]
+fn resource_selector_scans_normalized_ids() {
+    let ids = [
+        "minecraft:stone".to_owned(),
+        "minecraft:oak_stairs".to_owned(),
+        "example:stone".to_owned(),
+        "minecraft:éclair".to_owned(),
+    ];
+    assert_eq!(
+        select_resources(&ids, "stone")
+            .into_iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["minecraft:stone"]
+    );
+    assert_eq!(
+        select_resources(&ids, "minecraft:*stairs")
+            .into_iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["minecraft:oak_stairs"]
+    );
+    assert_eq!(
+        select_resources(&ids, "minecraft:?clair")
+            .into_iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["minecraft:éclair"]
+    );
+}
+
+#[test]
+fn modprofile_session_command_requires_admin_permission() {
+    let rules = horizon_client_core::gamerules::RuleRegistry::vanilla();
+    let session = vanilla::session_dispatcher(&rules, &[]);
+    assert!(vanilla::dispatcher().find("modprofile").is_none());
+    for permission in 0..=4 {
+        let mut registry = reg();
+        registry.permission = permission;
+        for (action, expected) in [
+            ("start", "modprofile.start"),
+            ("stop", "modprofile.stop"),
+            ("report", "modprofile.report"),
+        ] {
+            let line = format!("modprofile {action}");
+            let parse = session.parse(&line, &registry);
+            if permission < 3 {
+                assert!(parse.executable().is_err());
+            } else {
+                assert_eq!(parse.executable().unwrap().1, expected);
+            }
+        }
+    }
+}
+#[test]
+fn session_dispatchers_respect_feature_flags() {
+    let first = horizon_client_core::gamerules::RuleRegistry::vanilla();
+    let second = horizon_client_core::gamerules::RuleRegistry::vanilla();
+    let plain = vanilla::session_dispatcher(&first, &[]);
+    let enabled = vanilla::session_dispatcher(
+        &second,
+        &[horizon_client_core::gamerules::MINECART_IMPROVEMENTS.to_owned()],
+    );
+    let registries = reg();
+    assert!(
+        plain
+            .parse("gamerule max_minecart_speed 8", &registries)
+            .executable()
+            .is_err()
+    );
+    assert!(
+        enabled
+            .parse("gamerule max_minecart_speed 8", &registries)
+            .executable()
+            .is_ok()
+    );
+}
+
 #[test]
 fn parses_vanilla_commands() {
     assert_eq!(run("gamemode creative").unwrap().0, "gamemode");
@@ -163,6 +382,31 @@ fn parses_vanilla_commands() {
     assert!(ctx.has("strict") && ctx.has("filtered") && ctx.has("force") && !ctx.has("move"));
 }
 #[test]
+fn gamemode_parses_the_shared_game_type() {
+    use horizon_core::game_mode::GameMode;
+
+    let dispatcher = vanilla::dispatcher();
+    let registry = reg();
+    for (name, expected) in [
+        ("survival", GameMode::Survival),
+        ("creative", GameMode::Creative),
+        ("adventure", GameMode::Adventure),
+        ("spectator", GameMode::Spectator),
+    ] {
+        let parse = dispatcher.parse(&format!("gamemode {name}"), &registry);
+        let (ctx, _) = parse.executable().unwrap();
+        assert_eq!(ctx.get("gamemode"), Some(&Arg::GameMode(expected)));
+    }
+    for name in ["Creative", "1", "unknown"] {
+        let parse = dispatcher.parse(&format!("gamemode {name}"), &registry);
+        assert_eq!(
+            parse.executable().unwrap_err().message.plain(),
+            "argument.gamemode.invalid"
+        );
+    }
+}
+
+#[test]
 fn vanilla_error_messages() {
     let e = run("foo").unwrap_err();
     assert_eq!(e.message.plain(), "command.unknown.command");
@@ -211,7 +455,8 @@ fn commands_need_allow_commands() {
         .into_iter()
         .map(|s| s.text)
         .collect();
-    // Commands.java with CommandSelection.INTEGRATED: seed and version need no level.
+    // Commands.java with CommandSelection.INTEGRATED: seed and version need no
+    // level (a dedicated server's tree: a_dedicated_server_keeps_seed_and_version_for_game_masters).
     assert_eq!(
         root,
         [
@@ -336,6 +581,65 @@ fn entity_arguments_suggest_the_selected_entity() {
             "{players_only}"
         );
     }
+}
+#[test]
+fn whitespace_is_what_java_character_is_whitespace_says() {
+    let java: Vec<u32> = [
+        0x09..=0x0D,
+        0x1C..=0x20,
+        0x1680..=0x1680,
+        0x2000..=0x2006,
+        0x2008..=0x200A,
+        0x2028..=0x2029,
+        0x205F..=0x205F,
+        0x3000..=0x3000,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let ours: Vec<u32> = (0..=0x10FFFF)
+        .filter_map(char::from_u32)
+        .filter(|c| Reader::is_java_whitespace(*c))
+        .map(u32::from)
+        .collect();
+    assert_eq!(ours, java);
+
+    let mut r = Reader::new("\u{1F}\u{3000} x");
+    r.skip_whitespace();
+    assert_eq!(r.peek(), 'x');
+    for nbsp in ["\u{A0}", "\u{2007}", "\u{202F}", "\u{85}"] {
+        let text = format!("{nbsp}x");
+        let mut r = Reader::new(&text);
+        r.skip_whitespace();
+        assert_eq!(r.remaining(), text, "{:?} is not whitespace", nbsp);
+    }
+
+    let reg = reg();
+    let parse = |text: &str| selector::parse(&mut Reader::new(text), &reg, true).is_ok();
+    assert!(parse("@e[ type=minecraft:pig]"));
+    assert!(parse("@e[\u{1F}type=minecraft:pig]"));
+    assert!(!parse("@e[\u{A0}type=minecraft:pig]"));
+}
+#[test]
+fn a_registered_token_reads_as_a_whole_word_before_the_vanilla_letter() {
+    let mut reg = reg();
+    reg.selector_tokens
+        .push(horizon_client_core::registries::SelectorToken {
+            name: "allies".into(),
+            tooltip: "test.selector.allies".into(),
+            players_only: true,
+            limit: usize::MAX,
+            sort: "nearest",
+        });
+    let mut r = Reader::new("@allies[limit=1]");
+    let s = selector::parse(&mut r, &reg, true).unwrap();
+    assert_eq!(s.token.as_deref(), Some("allies"));
+    assert_eq!((s.limit, s.sort), (1, Sort::Nearest));
+    assert!(!s.include_entities);
+    let s = selector::parse(&mut Reader::new("@a"), &reg, true).unwrap();
+    assert_eq!((s.kind, s.token), ('a', None));
+    let error = selector::parse(&mut Reader::new("@zz"), &reg, true).unwrap_err();
+    assert_eq!(error.key, "argument.entity.selector.unknown");
 }
 #[test]
 fn a_uuid_selects_by_entity_uuid() {
@@ -692,9 +996,9 @@ fn horizon_commands_are_off_unless_the_server_turns_them_on() {
     // By default the game runs vanilla's tree: /help lists no /pregen.
     assert!(vanilla::game_dispatcher().find("pregen").is_none());
     for dev in [false, true] {
-        let vanilla_tree = vanilla::game_tree(dev, false);
+        let vanilla_tree = vanilla::game_tree(dev, false, false);
         assert!(vanilla_tree.find("pregen").is_none());
-        let d = vanilla::game_tree(dev, true);
+        let d = vanilla::game_tree(dev, true, false);
         let parse = d.parse("pregen start 100 circle", &reg());
         assert_eq!(parse.executable().unwrap().1, "pregen.start");
         // Vanilla's commands are the same with or without it.
@@ -703,4 +1007,808 @@ fn horizon_commands_are_off_unless_the_server_turns_them_on() {
             vanilla_tree.nodes[0].children.len() + 1
         );
     }
+}
+/// `run` on a dedicated server's tree.
+fn run_dedicated(input: &str) -> CmdResult<(String, Vec<String>)> {
+    let reg = reg();
+    let parse = vanilla::game_tree(true, false, true).parse(input, &reg);
+    let (ctx, id) = parse.executable()?;
+    Ok((
+        id.to_owned(),
+        ctx.args.iter().map(|a| a.name.clone()).collect(),
+    ))
+}
+#[test]
+fn profile_commands_parse_like_vanilla() {
+    // OpCommand, DeOpCommands, BanPlayerCommands, PardonCommand and
+    // WhitelistCommand: GameProfileArgument targets, admins only.
+    let run = run_dedicated;
+    assert_eq!(run("op Steve").unwrap().0, "op");
+    assert_eq!(run("deop @a").unwrap().0, "deop");
+    assert_eq!(run("pardon Steve").unwrap().0, "pardon");
+    assert_eq!(run("ban Steve").unwrap().0, "ban");
+    assert_eq!(
+        run("ban Steve griefing the farm").unwrap().1,
+        ["targets", "reason"]
+    );
+    for word in ["on", "off", "list", "reload"] {
+        assert_eq!(
+            run(&format!("whitelist {word}")).unwrap().0,
+            format!("whitelist.{word}")
+        );
+    }
+    assert_eq!(run("whitelist add Steve").unwrap().0, "whitelist.add");
+    assert_eq!(run("whitelist remove @p").unwrap().0, "whitelist.remove");
+    // GameProfileArgument: entity selectors are refused.
+    assert_eq!(
+        run("op @e").unwrap_err().message.plain(),
+        "argument.player.entities"
+    );
+    assert!(run("whitelist add").is_err());
+    let reg = Registries {
+        permission: 2,
+        ..reg()
+    };
+    let d = vanilla::game_tree(false, false, true);
+    for line in ["op Steve", "ban Steve", "whitelist on"] {
+        let e = d.parse(line, &reg).executable().unwrap_err();
+        assert_eq!(e.message.plain(), "command.unknown.command", "{line}");
+    }
+}
+#[test]
+fn the_dedicated_commands_complete_from_the_servers_lists() {
+    // OpCommand, DeOpCommands, PardonCommand, PardonIpCommand and WhitelistCommand: the server answers from
+    // its own lists (vanilla's `.suggests(...)`, javap on the pinned 26.3 classes), not from the registries'
+    // default of the one local player.
+    let reg = Registries {
+        permission: 4,
+        players: vec!["Alex".into(), "Steve".into(), "Zed".into()],
+        ops: vec!["steve".into()],
+        banned_players: vec!["Griefer".into()],
+        banned_ips: vec!["203.0.113.9".into()],
+        whitelisted: vec!["Alex".into(), "Old".into()],
+        ..reg()
+    };
+    let d = vanilla::game_tree(false, false, true);
+    let suggest = |input: &str| -> Vec<String> {
+        let parse = d.parse(input, &reg);
+        d.suggestions(&parse, input.len(), &reg)
+            .1
+            .into_iter()
+            .map(|s| s.text)
+            .collect()
+    };
+    // Only the online players who are not operators (the match ignores case).
+    assert_eq!(suggest("op "), ["Alex", "Zed"]);
+    assert_eq!(suggest("op z"), ["Zed"]);
+    assert_eq!(suggest("deop "), ["steve"]);
+    assert_eq!(suggest("pardon "), ["Griefer"]);
+    assert_eq!(suggest("pardon-ip "), ["203.0.113.9"]);
+    // Add offers the online players who are not whitelisted; remove offers the list, online or not.
+    assert_eq!(suggest("whitelist add "), ["Steve", "Zed"]);
+    assert_eq!(suggest("whitelist remove "), ["Alex", "Old"]);
+    // Nothing else changed: ban still completes by the argument type, with the selectors.
+    assert!(suggest("ban ").contains(&"@a".to_owned()));
+}
+#[test]
+fn only_a_dedicated_server_has_the_dedicated_commands() {
+    // Commands.CommandSelection: an integrated server (single player, a LAN
+    // world) registers no /op, /ban, /ban-ip, /banlist, /pardon, /pardon-ip,
+    // /deop, /setidletimeout, /transfer, /whitelist, /save-all, /save-off, /save-on or /stop,
+    // so /help and Tab don't offer them.
+    let dedicated = [
+        "ban",
+        "ban-ip",
+        "banlist",
+        "deop",
+        "op",
+        "pardon",
+        "pardon-ip",
+        "save-all",
+        "save-off",
+        "save-on",
+        "setidletimeout",
+        "stop",
+        "transfer",
+        "whitelist",
+    ];
+    for dev in [false, true] {
+        for horizon in [false, true] {
+            let integrated = vanilla::game_tree(dev, horizon, false);
+            let server = vanilla::game_tree(dev, horizon, true);
+            for name in dedicated {
+                assert!(integrated.find(name).is_none(), "{name}");
+                assert!(server.find(name).is_some(), "{name}");
+            }
+            // includeIntegrated: /publish and /unpublish are the integrated
+            // server's alone.
+            for name in ["publish", "unpublish"] {
+                assert!(integrated.find(name).is_some(), "{name}");
+                assert!(server.find(name).is_none(), "{name}");
+            }
+            assert_eq!(
+                server.nodes[0].children.len(),
+                integrated.nodes[0].children.len() + dedicated.len() - 2
+            );
+        }
+    }
+    assert!(vanilla::game_dispatcher().find("ban").is_none());
+    assert!(vanilla::release_dispatcher().find("ban").is_none());
+}
+#[test]
+fn a_dedicated_servers_admins_send_players_to_another_server() {
+    // TransferCommand.register: LEVEL_ADMINS, `<hostname> [<port> [<players>]]`
+    // with Brigadier's integer argument bounded to 1..=65535 for the port.
+    let server = vanilla::game_tree(false, false, true);
+    assert!(
+        vanilla::game_tree(false, false, false)
+            .find("transfer")
+            .is_none()
+    );
+    let at = |level: u8| Registries {
+        permission: level,
+        ..reg()
+    };
+    for line in [
+        "transfer example.net",
+        "transfer example.net 25566",
+        "transfer example.net 25566 Alex",
+    ] {
+        assert_eq!(
+            server.parse(line, &at(3)).executable().unwrap().1,
+            "transfer",
+            "{line}"
+        );
+    }
+    // The hostname is required.
+    let e = server.parse("transfer", &at(3)).executable().unwrap_err();
+    assert_eq!(e.message.plain(), "command.unknown.command");
+    // Below LEVEL_ADMINS the node is not there at all.
+    for level in [0, 1, 2] {
+        let e = server
+            .parse("transfer example.net", &at(level))
+            .executable()
+            .unwrap_err();
+        assert_eq!(
+            e.message.plain(),
+            "command.unknown.command",
+            "level {level}"
+        );
+    }
+    // Brigadier's integer argument bounded to 1..=65535: port 0 is low, 65536 big.
+    let e = server
+        .parse("transfer example.net 0", &at(3))
+        .executable()
+        .unwrap_err();
+    assert_eq!(e.message.plain(), "argument.integer.low");
+    let e = server
+        .parse("transfer example.net 65536", &at(3))
+        .executable()
+        .unwrap_err();
+    assert_eq!(e.message.plain(), "argument.integer.big");
+}
+/// The root literals a player at `level` is offered (the chat's, client tree).
+fn root_commands(d: &Dispatcher, level: u8) -> Vec<String> {
+    let reg = Registries {
+        permission: level,
+        ..reg()
+    };
+    let parse = d.parse("", &reg);
+    d.client_suggestions(&parse, 0, &reg)
+        .1
+        .into_iter()
+        .map(|s| s.text)
+        .collect()
+}
+#[test]
+fn a_dedicated_server_keeps_seed_and_version_for_game_masters() {
+    // Commands.java: SeedCommand.register(dispatcher, selection != INTEGRATED)
+    // and VersionCommand likewise; `checkPermissions` makes them require
+    // LEVEL_GAMEMASTERS instead of LEVEL_ALL. A dedicated server's player
+    // without op gets neither (a seed cracker's input on an SMP).
+    for dev in [false, true] {
+        for horizon in [false, true] {
+            let integrated = vanilla::game_tree(dev, horizon, false);
+            let server = vanilla::game_tree(dev, horizon, true);
+            let open = root_commands(integrated, 0);
+            assert!(open.contains(&"seed".to_owned()), "{open:?}");
+            assert!(open.contains(&"version".to_owned()), "{open:?}");
+            assert_eq!(
+                root_commands(server, 0),
+                [
+                    "help", "list", "me", "msg", "random", "teammsg", "tell", "tm", "trigger", "w"
+                ]
+            );
+            let gm = root_commands(server, 2);
+            assert!(gm.contains(&"seed".to_owned()), "{gm:?}");
+            assert!(gm.contains(&"version".to_owned()), "{gm:?}");
+            for line in ["seed", "version"] {
+                let player = Registries {
+                    permission: 0,
+                    ..reg()
+                };
+                // Brigadier: a node the source can't use is no node at all.
+                let e = server.parse(line, &player).executable().unwrap_err();
+                assert_eq!(e.message.plain(), "command.unknown.command", "{line}");
+                assert_eq!(e.input.as_deref(), Some(line), "{line}");
+                assert!(integrated.parse(line, &player).executable().is_ok());
+                let op = Registries {
+                    permission: 2,
+                    ..reg()
+                };
+                assert_eq!(server.parse(line, &op).executable().unwrap().1, line);
+            }
+        }
+    }
+}
+#[test]
+fn a_dedicated_servers_admins_set_the_idle_timeout() {
+    // SetPlayerIdleTimeoutCommand.register: LEVEL_ADMINS, and
+    // Brigadier's integer argument bounded to 0 — zero turns the timeout off, and a
+    // negative count of minutes is out of range.
+    let server = vanilla::game_tree(false, false, true);
+    let integrated = vanilla::game_tree(false, false, false);
+    assert!(integrated.find("setidletimeout").is_none());
+    let at = |level: u8| Registries {
+        permission: level,
+        ..reg()
+    };
+    // Below LEVEL_ADMINS the node is not there at all.
+    for level in [0, 1, 2] {
+        let e = server
+            .parse("setidletimeout 5", &at(level))
+            .executable()
+            .unwrap_err();
+        assert_eq!(
+            e.message.plain(),
+            "command.unknown.command",
+            "level {level}"
+        );
+    }
+    // The minutes are required: an incomplete command.
+    let e = server
+        .parse("setidletimeout", &at(3))
+        .executable()
+        .unwrap_err();
+    assert_eq!(e.message.plain(), "command.unknown.command");
+    for line in ["setidletimeout 0", "setidletimeout 5"] {
+        assert_eq!(
+            server.parse(line, &at(3)).executable().unwrap().1,
+            "setidletimeout"
+        );
+    }
+    // Brigadier's integer argument bounded to 0: argument.integer.low for -1 below 0.
+    let e = server
+        .parse("setidletimeout -1", &at(3))
+        .executable()
+        .unwrap_err();
+    assert_eq!(e.message.plain(), "argument.integer.low");
+    // Past i32 the number itself is unreadable.
+    let e = server
+        .parse("setidletimeout 2147483648", &at(3))
+        .executable()
+        .unwrap_err();
+    assert_eq!(e.message.plain(), "parsing.int.invalid");
+}
+
+#[test]
+fn time_argument_rounds_like_math_round_float() {
+    let ticks = |input: &str| {
+        let reg = reg();
+        let parse = vanilla::dispatcher().parse(input, &reg);
+        let (ctx, _) = parse.executable().unwrap();
+        match ctx.args.iter().find(|a| a.name == "time").unwrap().value {
+            Arg::Int(t) => t,
+            ref other => panic!("{other:?}"),
+        }
+    };
+    // 0.49999997 + 0.5 rounds up to 1.0 in f32, but Java's float rounding is exact.
+    assert_eq!(ticks("time set 0.49999997t"), 0);
+    assert_eq!(ticks("time set 0.5t"), 1);
+    assert_eq!(ticks("time add -2.5t"), -2);
+}
+
+#[test]
+fn a_dedicated_servers_owners_can_stop_and_save_it() {
+    // StopCommand, SaveAllCommand, SaveOffCommand and SaveOnCommand:
+    // Commands.hasPermission(LEVEL_OWNERS), an admin (3) gets none of them.
+    let server = vanilla::game_tree(false, false, true);
+    let at = |permission| Registries {
+        permission,
+        ..reg()
+    };
+    for (line, id) in [
+        ("stop", "stop"),
+        ("save-all", "save-all"),
+        ("save-all flush", "save-all"),
+        ("save-off", "save-off"),
+        ("save-on", "save-on"),
+    ] {
+        assert_eq!(
+            server.parse(line, &at(4)).executable().unwrap().1,
+            id,
+            "{line}"
+        );
+        assert!(server.parse(line, &at(3)).executable().is_err(), "{line}");
+    }
+}
+
+#[test]
+fn local_coordinate_missing_after_space_expects_a_coordinate() {
+    // LocalCoordinates.readDouble: nothing left to read is ERROR_EXPECTED_DOUBLE,
+    // with the cursor where it stopped; only a non-'^' character is "mixed".
+    let reg = reg();
+    let parse = |text: &str| {
+        let mut r = Reader::new(text);
+        let e = ArgType::Vec3 { center: true }
+            .parse(&mut r, &reg)
+            .map(|_| ())
+            .unwrap_err();
+        (e.key, e.cursor)
+    };
+    assert_eq!(parse("^1 "), ("argument.pos.missing.double".into(), 3));
+    assert_eq!(parse("^1 ^2 "), ("argument.pos.missing.double".into(), 6));
+    assert_eq!(parse("^1 ~"), ("argument.pos.mixed".into(), 0));
+}
+
+/// `execute … run` redirects back to the root, so a crafted deeply nested chain
+/// recurses `parse_nodes` once per level. It must be rejected by the depth guard,
+/// never overflow the parsing thread's stack (a stack overflow would abort this
+/// test binary rather than let it pass).
+#[test]
+fn deeply_nested_execute_run_is_rejected_not_overflowed() {
+    let mut deep = String::from("say hi");
+    for _ in 0..400 {
+        deep = format!("execute if entity @s run {deep}");
+    }
+    assert!(run(&deep).is_err());
+}
+
+/// The guard is high enough that real command chains still parse.
+#[test]
+fn shallow_execute_run_still_parses() {
+    assert!(run("execute if entity @s run say hi").is_ok());
+    assert!(run("execute as @a at @s run tp @s 0 0 0").is_ok());
+}
+
+#[test]
+fn h149_cardinal_local_positions_use_exact_table_values() {
+    let mut failures = Vec::new();
+    let got = Coordinates::Local([0.75, 0.5, 1.25])
+        .position([8.5, 202.25, 8.5], [0.0f32, 0.0f32])
+        .map(f64::to_bits);
+    let want = [
+        0x4022800000000000u64,
+        0x4069580000000000u64,
+        0x4023800000000000u64,
+    ];
+    if got != want {
+        failures.push(("south", got, want));
+    }
+    let got = Coordinates::Local([0.75, 0.5, 1.25])
+        .position([8.5, 202.25, 8.5], [90.0f32, 0.0f32])
+        .map(f64::to_bits);
+    let want = [
+        0x401d000000000000u64,
+        0x4069580000000000u64,
+        0x4022800000000000u64,
+    ];
+    if got != want {
+        failures.push(("west", got, want));
+    }
+    let got = Coordinates::Local([0.75, 0.5, 1.25])
+        .position([8.5, 202.25, 8.5], [180.0f32, 0.0f32])
+        .map(f64::to_bits);
+    let want = [
+        0x401f000000000000u64,
+        0x4069580000000000u64,
+        0x401d000000000000u64,
+    ];
+    if got != want {
+        failures.push(("north", got, want));
+    }
+    let got = Coordinates::Local([0.75, 0.5, 1.25])
+        .position([8.5, 202.25, 8.5], [270.0f32, 0.0f32])
+        .map(f64::to_bits);
+    let want = [
+        0x4023800000000000u64,
+        0x4069580000000000u64,
+        0x401f000000000000u64,
+    ];
+    if got != want {
+        failures.push(("east", got, want));
+    }
+    assert!(
+        failures.is_empty(),
+        "exact cardinal local-coordinate bit mismatches: {failures:#?}"
+    );
+}
+
+#[test]
+fn h149_oblique_local_offsets_are_grouped_before_the_origin() {
+    let world = Coordinates::World([
+        Coord {
+            relative: true,
+            value: 0.75,
+        },
+        Coord {
+            relative: true,
+            value: 0.5,
+        },
+        Coord {
+            relative: true,
+            value: 1.25,
+        },
+    ]);
+    assert_eq!(
+        world
+            .position([8.5, 202.25, 8.5], [37.5, -22.25])
+            .map(f64::to_bits),
+        [9.25f64, 202.75, 9.75].map(f64::to_bits),
+        "unchanged world/relative control before local failures"
+    );
+    let mut failures = Vec::new();
+    let got = Coordinates::Local([0.1, 0.1, 0.1])
+        .position([8.5, 202.25, 8.5], [37.5f32, -22.25f32])
+        .map(f64::to_bits);
+    let want = [
+        0x402117934a6314b9u64,
+        0x40694c2c5ee98f58u64,
+        0x40213562572e889au64,
+    ];
+    if got != want {
+        failures.push(("oblique", got, want));
+    }
+    let got = Coordinates::Local([0.1, 0.1, 0.1])
+        .position([8.5, 202.25, 8.5], [123.75f32, 47.125f32])
+        .map(f64::to_bits);
+    let want = [
+        0x4020a7648c7aa86bu64,
+        0x406947d514129374u64,
+        0x4021025e8b180036u64,
+    ];
+    if got != want {
+        failures.push(("positioned_oblique", got, want));
+    }
+    assert!(
+        failures.is_empty(),
+        "exact oblique local-coordinate bit mismatches: {failures:#?}"
+    );
+}
+
+#[test]
+fn a_custom_argument_parses_completes_and_keeps_its_id() {
+    let argument = ArgType::Custom(CustomArgument::new(
+        "example:machine",
+        CustomArgumentKind::Word,
+        |input| {
+            if input == "press" {
+                Ok(input.to_owned())
+            } else {
+                Err(Text::literal(format!("unknown machine `{input}`")))
+            }
+        },
+        |_, prefix| {
+            ["press", "furnace"]
+                .into_iter()
+                .filter(|machine| machine.starts_with(prefix))
+                .map(|text| CustomSuggestion {
+                    text: text.to_owned(),
+                    tooltip: None,
+                    replace_start: None,
+                })
+                .collect()
+        },
+    ));
+    let mut dispatcher = Dispatcher::new();
+    let command = dispatcher.literal(0, "machine");
+    let use_node = dispatcher.literal(command, "use");
+    let machine = dispatcher.argument(use_node, "machine", argument);
+    dispatcher.executes(machine, "test");
+
+    let registries = reg();
+    let parsed = dispatcher.parse("machine use press", &registries);
+    let (context, _) = parsed.executable().unwrap();
+    assert_eq!(
+        context.get("machine"),
+        Some(&Arg::Custom {
+            kind: "example:machine".into(),
+            value: "press".into(),
+        })
+    );
+    let error = dispatcher
+        .parse("machine use banana", &registries)
+        .executable()
+        .unwrap_err();
+    assert_eq!(error.message, Text::literal("unknown machine `banana`"));
+
+    let typed = "machine use pr";
+    let (_, suggestions) = dispatcher.suggestions(
+        &dispatcher.parse(typed, &registries),
+        typed.len(),
+        &registries,
+    );
+    assert_eq!(
+        suggestions
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>(),
+        ["press"]
+    );
+}
+
+#[test]
+fn a_greedy_custom_argument_takes_the_rest_of_the_line() {
+    let argument = ArgType::Custom(CustomArgument::new(
+        "example:note",
+        CustomArgumentKind::Greedy,
+        |input| Ok(input.trim().to_owned()),
+        |_, _| Vec::new(),
+    ));
+    let mut dispatcher = Dispatcher::new();
+    let note = dispatcher.literal(0, "note");
+    let set = dispatcher.literal(note, "set");
+    let text = dispatcher.argument(set, "text", argument);
+    dispatcher.executes(text, "test");
+
+    let registries = reg();
+    let parsed = dispatcher.parse("note set hello there", &registries);
+    let (context, _) = parsed.executable().unwrap();
+    assert_eq!(
+        context.get("text"),
+        Some(&Arg::Custom {
+            kind: "example:note".into(),
+            value: "hello there".into(),
+        })
+    );
+}
+
+#[test]
+fn an_ask_server_node_replies_with_the_token_range_when_it_has_no_suggestion_of_its_own() {
+    // The free `id` node: vanilla's identifier parser with `minecraft:ask_server`. It computes
+    // nothing locally, so the range the server sends must still be the token being typed: the
+    // completions a mod adds in `tab_complete` are applied there, not at the start of the line.
+    let mut dispatcher = Dispatcher::new();
+    let probe = dispatcher.literal(0, "probe");
+    let value = dispatcher.argument(probe, "value", ArgType::Identifier);
+    dispatcher.suggests(value, Suggests::AskServer);
+    let registries = reg();
+    let typed = "probe ston";
+    let parse = dispatcher.parse(typed, &registries);
+    let (range, list, ask) = dispatcher.client_suggestions_asking(&parse, typed.len(), &registries);
+    assert!(ask, "the client asks the server for this node");
+    assert!(list.is_empty(), "the identifier itself suggests nothing");
+    assert_eq!(range, (6, typed.len()), "the token, never (0, 0)");
+    // The server answers the same way; its dispatcher has no provider to ask, only its mods.
+    let (range, list) = dispatcher.suggestions(&parse, typed.len(), &registries);
+    assert!(list.is_empty());
+    assert_eq!(range, (6, typed.len()));
+}
+
+#[test]
+fn an_expanded_suggestion_past_the_packet_text_limit_is_left_out() {
+    // Two completions that each fit the packet's 32767 UTF-16 units on their own: one replaces
+    // the whole 32002-character text, the other only its last character. Padding the second with
+    // the prefix it starts after expands to 64768 characters, so the packet cannot carry it; it
+    // is left out and the first one stays.
+    let input = "a".repeat(32002);
+    let whole = || Suggestion {
+        range: (0, input.len()),
+        text: "short".into(),
+        tooltip: None,
+        int_value: None,
+    };
+    let from_last = |len: usize| Suggestion {
+        range: (input.len() - 1, input.len()),
+        text: "b".repeat(len),
+        tooltip: None,
+        int_value: None,
+    };
+    let (range, merged) = merge_suggestions(&input, vec![whole(), from_last(32767)]);
+    assert_eq!(range, (0, input.len()));
+    assert_eq!(
+        merged.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
+        ["short"]
+    );
+    // The kept one applies to the whole text, so the chat can still offer it.
+    assert_eq!(merged[0].apply(&input), "short");
+    // The limit counts the expanded text: the 32001 characters in front of the last one plus
+    // its own 766 is exactly 32767 and stays, one character more does not.
+    let (_, merged) = merge_suggestions(&input, vec![whole(), from_last(766)]);
+    assert_eq!(merged.len(), 2);
+    assert!(
+        merged
+            .iter()
+            .any(|s| s.text.encode_utf16().count() == 32767),
+        "a completion expanded to exactly the limit stays"
+    );
+    let (_, merged) = merge_suggestions(&input, vec![whole(), from_last(767)]);
+    assert_eq!(merged.len(), 1, "32768 characters cannot cross the wire");
+}
+
+#[test]
+fn a_custom_suggestion_replaces_only_the_token_it_names() {
+    let argument = ArgType::Custom(CustomArgument::new(
+        "example:pattern",
+        CustomArgumentKind::Greedy,
+        |input| Ok(input.to_owned()),
+        |_, prefix| {
+            let start = prefix.rfind(' ').map_or(0, |space| space + 1);
+            let mut out: Vec<CustomSuggestion> = ["stone", "dirt"]
+                .into_iter()
+                .filter(|block| block.starts_with(&prefix[start..]))
+                .map(|block| CustomSuggestion {
+                    text: block.to_owned(),
+                    tooltip: None,
+                    replace_start: Some(start),
+                })
+                .collect();
+            // A suggestion past the typed text is left out, never applied.
+            out.push(CustomSuggestion {
+                text: "nowhere".to_owned(),
+                tooltip: None,
+                replace_start: Some(prefix.len() + 1),
+            });
+            out
+        },
+    ));
+    let mut dispatcher = Dispatcher::new();
+    let replace = dispatcher.literal(0, "replace");
+    let pattern = dispatcher.argument(replace, "pattern", argument);
+    dispatcher.executes(pattern, "test");
+
+    let registries = reg();
+    let typed = "replace stone st";
+    let parse = dispatcher.parse(typed, &registries);
+    let (range, suggestions) = dispatcher.suggestions(&parse, typed.len(), &registries);
+    assert_eq!(range, (14, typed.len()), "the range covers the typed token");
+    assert_eq!(
+        suggestions
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>(),
+        ["stone"]
+    );
+    assert_eq!(suggestions[0].apply(typed), "replace stone stone");
+}
+
+#[test]
+fn a_split_character_completion_does_not_displace_a_valid_neighbor() {
+    let argument = ArgType::Custom(CustomArgument::new(
+        "example:unicode",
+        CustomArgumentKind::Greedy,
+        |input| Ok(input.to_owned()),
+        |_, _| {
+            vec![
+                CustomSuggestion {
+                    text: "emerald".into(),
+                    tooltip: None,
+                    replace_start: Some(0),
+                },
+                CustomSuggestion {
+                    text: "broken".into(),
+                    tooltip: None,
+                    replace_start: Some(1),
+                },
+            ]
+        },
+    ));
+    let mut dispatcher = Dispatcher::new();
+    let probe = dispatcher.literal(0, "probe");
+    let value = dispatcher.argument(probe, "value", argument);
+    dispatcher.executes(value, "test");
+    let registries = reg();
+    let typed = "probe é";
+    let (range, suggestions) = dispatcher.suggestions(
+        &dispatcher.parse(typed, &registries),
+        typed.len(),
+        &registries,
+    );
+    assert_eq!(range, (6, 8));
+    assert_eq!(
+        suggestions
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>(),
+        ["emerald"]
+    );
+    assert_eq!(suggestions[0].apply(typed), "probe emerald");
+}
+
+#[test]
+fn a_free_identifier_keeps_vanillas_empty_paths_and_rejects_invalid_namespaces() {
+    let mut dispatcher = Dispatcher::new();
+    let probe = dispatcher.literal(0, "probe");
+    let value = dispatcher.argument(probe, "value", ArgType::Identifier);
+    dispatcher.executes(value, "test");
+    let registries = reg();
+    for (raw, expected) in [
+        ("//path", "minecraft://path"),
+        (":", "minecraft:"),
+        ("namespace:", "namespace:"),
+        ("namespace:lower/path", "namespace:lower/path"),
+    ] {
+        let typed = format!("probe {raw}");
+        let parsed = dispatcher.parse(&typed, &registries);
+        let (context, _) = parsed.executable().unwrap();
+        assert_eq!(
+            context.get("value"),
+            Some(&Arg::Str(expected.into())),
+            "{raw}"
+        );
+    }
+    for raw in ["name/space:path", "namespace:Upper"] {
+        let typed = format!("probe {raw}");
+        assert!(
+            dispatcher.parse(&typed, &registries).executable().is_err(),
+            "{raw}"
+        );
+    }
+}
+
+#[test]
+fn profiler_commands_parse_and_complete_for_a_player_without_operator_permission() {
+    let reg = Registries {
+        permission: 0,
+        ..reg()
+    };
+    let tree = vanilla::game_dispatcher().with_profiler();
+    for line in [
+        "profiler start",
+        "profiler start client",
+        "profiler start gpu",
+        "profiler start client gpu_detail",
+        "profiler stop server",
+        "profiler status",
+        "profiler share",
+        "profiler share profile-20251107-143844Z",
+        "profiler open",
+        "profiler open profile-20251107-143844Z",
+        "profiler mark slow frame",
+    ] {
+        assert_eq!(
+            tree.parse(line, &reg).executable().unwrap().1,
+            PROFILER_COMMAND,
+            "{line}"
+        );
+    }
+    let input = "profiler start ";
+    let parse = tree.parse(input, &reg);
+    let sides: Vec<_> = tree
+        .client_suggestions(&parse, input.len(), &reg)
+        .1
+        .into_iter()
+        .map(|s| s.text)
+        .collect();
+    assert_eq!(sides, ["client", "gpu", "gpu_detail", "server"]);
+    for line in [
+        "profiler start --gpu",
+        "profiler stop gpu",
+        "profiler start gpu client",
+    ] {
+        assert!(tree.parse(line, &reg).executable().is_err(), "{line}");
+    }
+    assert!(vanilla::game_dispatcher().find("profiler").is_none());
+    assert!(tree.has_horizon_profiler());
+}
+
+#[test]
+fn a_servers_own_profiler_keeps_its_node_and_is_not_horizons() {
+    let mut server = vanilla::game_dispatcher().clone();
+    let node = server.literal(0, "profiler");
+    server.executes(node, "server:profiler");
+    let open = server.literal(node, "open");
+    server.executes(open, "server:profiler");
+    let tree = server.with_profiler();
+    assert!(!tree.has_horizon_profiler());
+    let input = "profiler ";
+    let parse = tree.parse(input, &reg());
+    let offered: Vec<_> = tree
+        .client_suggestions(&parse, input.len(), &reg())
+        .1
+        .into_iter()
+        .map(|s| s.text)
+        .collect();
+    assert_eq!(offered, ["open"]);
+    assert!(!vanilla::game_dispatcher().has_horizon_profiler());
 }

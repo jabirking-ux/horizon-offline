@@ -11,7 +11,7 @@ impl Launcher {
     /// and an update when one waits. No `tag`: a Java instance's Minecraft (`game` then names its
     /// loader too).
     pub(super) fn hero(
-        &self,
+        &mut self,
         tag: &str,
         game: &str,
         prepared: bool,
@@ -19,6 +19,10 @@ impl Launcher {
     ) -> Div {
         let t = self.theme;
         let n = t.night;
+        let icon = self
+            .selected_instance()
+            .cloned()
+            .map(|i| self.instance_icon(&i, 56.));
         let instance = self.selected_instance();
         let name = instance.map_or(
             if tag.is_empty() {
@@ -33,13 +37,48 @@ impl Launcher {
             what.push(format!(
                 "Horizon {}",
                 horizon_launcher::nightly::label(tag)
+                    .or_else(|| horizon_launcher::build_import::label(tag))
                     .unwrap_or_else(|| tag.trim_start_matches('v').to_string())
             ));
         }
         what.push(tr(if prepared { "Ready" } else { "Needs preparing" }).to_string());
-        if let Some(playing) = self.playing {
-            what.push(format!("{} playing now", thousands(playing)));
-        }
+        // The exact count, a link to the page with its history and peaks.
+        let ink = c(n.ink);
+        let playing = self.playing.map(|count| {
+            let label = format!(
+                "· {}",
+                trf("{count} playing now", &[("count", &thousands(count))])
+            );
+            match telemetry::stats_url(&self.links.website) {
+                Some(url) => div()
+                    .id("playing-now")
+                    .cursor_pointer()
+                    .hover(move |s| s.text_color(ink))
+                    .child(label)
+                    .on_click(move |_: &ClickEvent, _, cx| cx.open_url(&url))
+                    .into_any_element(),
+                None => div().child(label).into_any_element(),
+            }
+        });
+        // The official server's own count, from its status ping: opens the Servers page, where
+        // it is listed.
+        let official = self.official_players.map(|count| {
+            div()
+                .id("official-players")
+                .cursor_pointer()
+                .hover(move |s| s.text_color(ink))
+                .child(format!(
+                    "· {}",
+                    trf(
+                        "{count} on the official SMP",
+                        &[("count", &thousands(count))]
+                    )
+                ))
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.go(Page::Servers);
+                    cx.notify();
+                }))
+        });
         let state = div()
             .flex()
             .items_center()
@@ -53,7 +92,11 @@ impl Launcher {
             .child(
                 shell::text(night::CAPTION, c(n.ink_soft))
                     .font_weight(FontWeight::MEDIUM)
-                    .child(what.join(" · ")),
+                    .flex()
+                    .gap(px(4.))
+                    .child(what.join(" · "))
+                    .children(playing)
+                    .children(official),
             );
         // Never squeezed by the rows below: the ping notice can make it tall.
         let mut hero = div()
@@ -63,9 +106,17 @@ impl Launcher {
             .gap(px(10.))
             .child(state)
             .child(
-                shell::text(night::DISPLAY, c(n.ink))
-                    .truncate()
-                    .child(name.to_string()),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(16.))
+                    .children(icon)
+                    .child(
+                        shell::text(night::DISPLAY, c(n.ink))
+                            .min_w_0()
+                            .truncate()
+                            .child(name.to_string()),
+                    ),
             )
             .children(instance.map(|i| {
                 shell::text(night::UI, c(n.ink_soft)).child(instances_page::played_line(i))
@@ -78,7 +129,10 @@ impl Launcher {
                 .items_center()
                 .gap(px(8.))
                 .child(div().size(px(6.)).bg(c(n.accent_hi)))
-                .child(format!("{} available", update_name(release)));
+                .child(trf(
+                    "{version} available",
+                    &[("version", update_name(release))],
+                ));
             hero = hero.child(match installing {
                 Some((_, p)) => line
                     .child(
@@ -95,7 +149,7 @@ impl Launcher {
                         .font_weight(FontWeight::SEMIBOLD)
                         .cursor_pointer()
                         .hover(|s| s.opacity(0.8))
-                        .child("Install")
+                        .child(tr("Install"))
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.install_update();
                             cx.notify();
@@ -118,12 +172,12 @@ impl Launcher {
                     .child(
                         shell::text(night::UI, c(n.ink))
                             .relative()
-                            .child(telemetry::PING_NAME),
+                            .child(tr(telemetry::PING_NAME)),
                     )
                     .child(
                         shell::text(night::CAPTION, c(n.muted))
                             .relative()
-                            .child(telemetry::PING),
+                            .child(tr(telemetry::PING)),
                     )
                     .child(
                         shell::text(night::UI, c(n.accent_hi))
@@ -132,10 +186,10 @@ impl Launcher {
                             .font_weight(FontWeight::SEMIBOLD)
                             .cursor_pointer()
                             .hover(|s| s.opacity(0.8))
-                            .child("Got it")
+                            .child(tr("Got it"))
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.settings.ping_notice_seen = true;
-                                this.settings.save();
+                                this.save_settings();
                                 cx.notify();
                             })),
                     ),
@@ -186,22 +240,35 @@ impl Launcher {
                     .relative()
                     .child(blocks::icon("play", 20., c(t.night.on_accent))),
             )
-            .child(label(
-                tr(if running { "Running" } else { "Play" }).to_string(),
-            ));
-        match play_press(ready, self.owner, self.preparing || running) {
+            .child(label(match self.play_step.now() {
+                // The step a start is on, once it said one.
+                Some(step) if self.starting_client.is_some() => step.to_owned(),
+                _ => tr(if running { "Running" } else { "Play" }).to_string(),
+            }));
+        match play_press(
+            ready,
+            if horizon_launcher::developer_offline::selected() {
+                Some(true)
+            } else {
+                self.owner
+            },
+            self.preparing || running,
+        ) {
             PlayPress::Nothing => play = disabled(play),
             PlayPress::Play => {
                 play = play.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.picker_open = false;
+                    this.picker.open = false;
                     this.play();
                     cx.notify();
                 }))
             }
             PlayPress::PrepareThenPlay => {
                 play = play.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.picker_open = false;
-                    this.play_when_prepared = this.selected().cloned();
+                    this.picker.open = false;
+                    this.play_when_prepared = this
+                        .selected()
+                        .cloned()
+                        .zip(this.selected_instance().map(|i| i.id.clone()));
                     this.prepare(backend::MinecraftFrom::Install);
                     cx.notify();
                 }))
@@ -229,7 +296,7 @@ impl Launcher {
                     .child(label(tr("Folder").to_string()))
                     .on_click(move |_, _, cx| {
                         let _ = std::fs::create_dir_all(&home);
-                        cx.open_with_system(&home);
+                        crate::glass_toast::open(cx, &home);
                     })
             }))
     }
@@ -259,7 +326,7 @@ impl Launcher {
             .flex_none()
             .flex_col()
             .gap(px(8.))
-            .w(px(320.))
+            .w(px(360.))
             .p(px(20.));
         if let Some(line) = summary {
             card = card
@@ -270,6 +337,7 @@ impl Launcher {
                         .font_weight(FontWeight::BOLD)
                         .child(
                             horizon_launcher::nightly::label(tag)
+                                .or_else(|| horizon_launcher::build_import::label(tag))
                                 .unwrap_or_else(|| tag.trim_start_matches('v').to_string()),
                         ),
                 )
@@ -323,17 +391,17 @@ impl Launcher {
                 focused,
                 false,
                 false,
-                "Paste an invite code",
+                tr("Paste an invite code"),
             ))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                window.focus(&this.friend_focus);
+                window.focus(&this.friend_focus, cx);
                 cx.notify();
             }))
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 match line_edit::handle(&mut this.friend_code, ev, cx) {
                     line_edit::Key::Pass => return,
                     line_edit::Key::Enter => this.join_friend(),
-                    line_edit::Key::Escape => window.blur(),
+                    line_edit::Key::Escape => window.blur(cx),
                     _ => {}
                 }
                 cx.stop_propagation();

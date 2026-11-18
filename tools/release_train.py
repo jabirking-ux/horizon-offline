@@ -8,10 +8,9 @@
 
 The game ships only the Nightly since 2026-10-28 (Ludovic): when `decide --kind game` says so, release.yml starts
 `nightly build` on the commit it decided (tools/ci/nightly.py), and "the last release" is the published Nightly.
-
 A kind releases when a pull request merged into main since its last published release changed one of its
 player-facing paths (GAME_PATHS, LAUNCHER_PATHS), once BATCH of them are waiting and the newest merged at least
-DEBOUNCE ago (a burst of merges becomes one release), or once the oldest has waited MAX_WAIT (a lone fix still ships),
+DEBOUNCE ago (a burst of merges becomes one release), or once the oldest has waited MAX_WAIT (LAUNCHER_MAX_WAIT for the launcher: a lone fix still ships),
 or at once when one of those pull requests is labelled release-now. Pull requests labelled skip-release (work players don't see) don't count
 towards a release and aren't listed in the notes. RELEASES_PAUSED=1 (a repository variable) stops automatic releases,
 and an open issue labelled release-blocker stops game releases, even forced ones, until it is closed.
@@ -50,6 +49,10 @@ MAINTAINER = "ludovic111"
 BATCH = 5
 DEBOUNCE = dt.timedelta(minutes=5)
 MAX_WAIT = dt.timedelta(hours=6)
+# The launcher waits an hour at most: a fix to installs or updates is what players are waiting for, and a launcher
+# release updates itself without touching worlds (2026-11-17: the Voltz install fix sat merged, "3 of 5 pull
+# requests: waiting for more, or 234 more minutes", while players couldn't install the mod).
+LAUNCHER_MAX_WAIT = dt.timedelta(hours=1)
 # Kept as typed in release titles, where the clauses after the first are lowercased.
 PROPER = {"Horizon", "Horizon's", "Minecraft", "Mojang", "Microsoft", "Java", "Xbox", "PlayStation", "Steam", "Windows",
           "Linux", "LAN", "Kira", "Discord", "Wayland", "Hyprland", "F3", "GUI", "UI"}
@@ -70,26 +73,34 @@ LAUNCHER_PATHS = [
     "launcher/",
     "crates/horizon-bench/",
     "crates/horizon-friends/",
-    "crates/horizon-mods/",
+    "crates/horizon-mcp/",
+    "crates/horizon-mod-api-gen/",
+    "crates/horizon-mod-package/",
     "crates/horizon-port-pack/",
     "crates/horizon-prepare/",
     "crates/horizon-release-sign/",
-    "crates/horizon-telemetry/",
+    "crates/horizon-system/",
     "crates/horizon-theme/",
+    # Its icon, its menu entries and its AppImage are compiled or packaged into a release
+    # (launcher/build.rs, src/desktop.rs, packaging/linux/appimage.sh).
+    "packaging/icons/",
+    "packaging/linux/",
 ]
 LAUNCHER_IGNORED = ["launcher/links.json", "launcher/docs/", "launcher/tests/"]
 
 # A game release is GitHub's latest (servers and install.sh follow it), so it is the first release people land on:
 # its notes open with the way to the launcher (#1647). Raw HTML on one line, which GitHub shows and every launcher's
 # notes view and one-line summary skip (pulldown-cmark's HTML events), so launchers never tell players to get
-# themselves. The site's Releases page leaves it out too. Player notes always name horizon-rust/horizon, even when CI on a fork sets GITHUB_REPOSITORY to that fork.
-PLAYERS = ('<h3>Want to play? Download the <a href="https://playhorizon.dev">Horizon launcher</a>, not the files '
-           'below</h3><p>It installs this version and keeps it up to date. It is also on GitHub: <a href="'
-           'https://github.com/horizon-rust/horizon/releases?q=launcher&amp;expanded=true">the launcher releases</a>. You need your '
-           "own copy of Minecraft: Java Edition. The files below are what the launcher installs, and the dedicated "
-           "server for people who host one.</p>")
-LAUNCHER_FOOTER = ("Your launcher updates itself. New here? Download the archive for your system below, extract it, "
-                   "and run `horizon-launcher`. Website: https://playhorizon.dev")
+# themselves. The site's Releases page leaves it out too.
+# The same warning closes the notes, above the disclaimer, for whoever scrolls past the changes to the files.
+PLAYERS_FOOTER = ('<h1>Want to play? Download the <a href="https://playhorizon.dev">Horizon launcher</a>.</h1>'
+                  '<h1>Do NOT run the files below. They will not work on their own.</h1>')
+PLAYERS = (PLAYERS_FOOTER + '<p>The launcher installs this version and keeps it up to date. You need your own copy of '
+           'Minecraft: Java Edition. The files below are what the launcher installs, and the dedicated server for '
+           'people who host one.</p>')
+LAUNCHER_FOOTER = ("Your launcher updates itself. New here? On Linux take the .AppImage below, make it executable "
+                   "and run it; on Windows and macOS download the archive, extract it and run `horizon-launcher` "
+                   "(Horizon.app on macOS). Website: https://playhorizon.dev")
 DISCLAIMER = "Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft."
 # An open issue with this label holds every game release (docs/release-flow.md). Only people who can triage the
 # repository can add it, and the issue's text is never read: its author could edit it afterwards.
@@ -227,18 +238,42 @@ def changed_paths(commit):
     return run("git", "diff", "--name-only", f"{commit}^1", commit).split()
 
 
-def pull_request(number):
-    data = gh_json("pr", "view", str(number), "--repo", REPO, "--json",
-                   "number,title,url,labels,closingIssuesReferences,author,mergedAt")
-    return {
-        "number": data["number"],
-        "title": data["title"].strip(),
-        "url": data["url"],
-        "labels": sorted(label["name"] for label in data["labels"]),
-        "issues": sorted(issue["number"] for issue in data.get("closingIssuesReferences") or []),
-        "author": (data.get("author") or {}).get("login", ""),
-        "merged_at": dt.datetime.fromisoformat(data["mergedAt"].replace("Z", "+00:00")) if data.get("mergedAt") else None,
+def merged_pull_request_metadata():
+    """Repository-owned merge identities and note fields, without one network call per PR."""
+    owner, name = REPO.split("/")
+    query = """
+    query($owner: String!, $name: String!, $endCursor: String) {
+      repository(owner: $owner, name: $name) {
+        pullRequests(first: 100, states: MERGED, after: $endCursor) {
+          nodes {
+            number title url mergedAt mergeCommit { oid } author { login }
+            labels(first: 100) { nodes { name } }
+            closingIssuesReferences(first: 100) { nodes { number } }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
     }
+    """
+    pages = gh_json("api", "graphql", "--paginate", "--slurp",
+                    "-F", f"owner={owner}", "-F", f"name={name}", "-f", f"query={query}")
+    owned = {}
+    for page in pages:
+        for data in page["data"]["repository"]["pullRequests"]["nodes"]:
+            # A historical merge commit can have been removed by a force-push. It cannot
+            # match a reachable candidate; GraphQL explicitly permits a null commit.
+            if data["mergeCommit"] is None:
+                continue
+            owned[(data["number"], data["mergeCommit"]["oid"])] = {
+                "number": data["number"],
+                "title": data["title"].strip(),
+                "url": data["url"],
+                "labels": sorted(label["name"] for label in data["labels"]["nodes"]),
+                "issues": sorted(issue["number"] for issue in data["closingIssuesReferences"]["nodes"]),
+                "author": (data["author"] or {}).get("login", ""),
+                "merged_at": dt.datetime.fromisoformat(data["mergedAt"].replace("Z", "+00:00")),
+            }
+    return owned
 
 
 def published_releases():
@@ -288,6 +323,8 @@ def decision(kind, prs, now, paused=False, force=False, new_line=None, blockers=
     counted = [pr for pr in prs if pr["paths"] and "skip-release" not in pr["labels"]]
     urgent = [pr for pr in counted if "release-now" in pr["labels"]]
     merged = [pr["merged_at"] for pr in counted if pr.get("merged_at")]
+    max_wait = LAUNCHER_MAX_WAIT if kind == "launcher" else MAX_WAIT
+    hours = max_wait.seconds // 3600
     if blockers:
         return False, "held by " + ", ".join(f"release-blocker #{number}" for number in blockers)
     if force:
@@ -300,10 +337,11 @@ def decision(kind, prs, now, paused=False, force=False, new_line=None, blockers=
         return False, "no merged pull request changed what players run"
     if urgent:
         return True, "release-now: " + ", ".join(f"#{pr['number']}" for pr in urgent)
-    if merged and now - min(merged) >= MAX_WAIT:
-        return True, f"{len(counted)} pull requests changed what players run; the oldest has waited {MAX_WAIT.seconds // 3600} hours"
+    if merged and now - min(merged) >= max_wait:
+        return True, (f"{len(counted)} pull requests changed what players run; the oldest has waited {hours} "
+                      f"hour{'s' if hours != 1 else ''}")
     if len(counted) < BATCH:
-        wait = MAX_WAIT - (now - min(merged)) if merged else MAX_WAIT
+        wait = max_wait - (now - min(merged)) if merged else max_wait
         return False, (f"{len(counted)} of {BATCH} pull requests: waiting for more, or {wait.seconds // 60 + 1} more "
                        "minutes for the oldest")
     if merged and now - max(merged) < DEBOUNCE:
@@ -312,9 +350,20 @@ def decision(kind, prs, now, paused=False, force=False, new_line=None, blockers=
     return True, f"{len(counted)} pull requests changed what players run"
 
 
+# A title's `kind(area): ` prefix (CONTRIBUTING.md "Pull requests") labels the pull request; release names and notes
+# read the words after it.
+KIND_PREFIX = re.compile(r"^\s*(?:parity|bug|fix|perf|feature|feat|extra|tooling|docs)(?:\([^)]*\))?\s*:\s*", re.I)
+
+
+def plain(title):
+    """A title without its `kind(area): ` prefix, capitalised: "parity(mobs): ghasts fly" -> "Ghasts fly"."""
+    rest = KIND_PREFIX.sub("", title.strip(), count=1)
+    return rest if rest == title.strip() else rest[:1].upper() + rest[1:]
+
+
 def clause(title):
     """The start of a pull request title, for a release's name: "Nether portals: vanilla timing" -> "Nether portals"."""
-    title = re.sub(r"^(?:fix|fixes|fixed)\s+(?:the\s+)?", "", title.strip(), flags=re.I)
+    title = re.sub(r"^(?:fix|fixes|fixed)\s+(?:the\s+)?", "", plain(title), flags=re.I)
     return re.split(r"[:;(]| — | - ", title, maxsplit=1)[0].strip().rstrip(".")
 
 
@@ -344,7 +393,7 @@ def summary(new, fixed, limit=72):
 
 def bullet(pr):
     """A pull request as a line of notes: its title (written for people), its number and the issues it closes."""
-    title = re.sub(r"\s*\((?:fixes|closes) #\d+\)|,? stacked on #\d+", "", pr["title"]).strip().rstrip(".")
+    title = re.sub(r"\s*\((?:fixes|closes) #\d+\)|,? stacked on #\d+", "", plain(pr["title"])).strip().rstrip(".")
     issues = "".join(f", fixes #{issue}" for issue in pr["issues"])
     return f"- {title} (#{pr['number']}{issues})"
 
@@ -410,6 +459,8 @@ def notes(kind, version, prs, issues, previous=None):
         parts.append("### Contributors\nThanks to " + ", ".join(f"@{name}" for name in contributors) + ".")
     if kind == "launcher":
         parts.append(LAUNCHER_FOOTER)
+    if kind == "game":
+        parts.append(PLAYERS_FOOTER)
     parts.append("---\n" + DISCLAIMER)
     return title, "\n\n".join(parts) + "\n"
 
@@ -465,9 +516,17 @@ def gather(kind, head, releases=None):
 def merged_between(kind, base, head):
     """The pull requests merged into main between base and head, with their player-facing paths ("paths")."""
     exporter_paths = exporters()
+    candidates = merged_pull_requests(base, head)
+    if not candidates:
+        return []
+    # Merge subjects survive imports and PR numbers are repository-local. Fetch this
+    # repository's merge identities AND note fields in one fully paginated query.
+    owned = merged_pull_request_metadata()
     prs = []
-    for number, commit in merged_pull_requests(base, head):
-        pr = pull_request(number)
+    for number, commit in candidates:
+        if (number, commit) not in owned:
+            continue
+        pr = owned[(number, commit)].copy()
         pr["paths"] = [path for path in changed_paths(commit) if player_facing(path, kind, exporter_paths)]
         prs.append(pr)
     return prs
@@ -483,16 +542,25 @@ def passed_on(workflow, sha):
 
 def green_main_head(parity=False):
     """The newest commit on main whose checks passed: what an automatic release builds. With parity (game
-    releases), the newest commit parity-main passed on, if its checks passed too: parity-main runs on batches of
-    merges, so the commits a run skipped are covered by the next one, and a superseded run counts for nothing."""
-    workflow = "parity-main" if parity else "checks"
-    runs = gh_json("run", "list", "--repo", REPO, "--workflow", workflow, "--branch", "main", "--event", "push",
-                   "--limit", "10", "--json", "headSha,status,conclusion")
+    releases), the newest commit parity-main passed on whose checks passed too: parity-main runs on batches of
+    merges, so the commits a run skipped are covered by the next one, and a superseded run counts for nothing. A
+    later batch that failed holds only the merges after that commit, which the green one doesn't contain."""
+    if parity:
+        # Only the successful runs: while merges land, one run at a time finishes (the pending one is replaced at
+        # every push), and a later failed or timed-out batch must not starve the Nightly of the commit an earlier
+        # run passed (2026-11-02: no Nightly for 30 h while main had a green commit parity-main had passed).
+        runs = gh_json("run", "list", "--repo", REPO, "--workflow", "parity-main", "--branch", "main", "--event",
+                       "push", "--status", "success", "--limit", "20", "--json", "headSha,status,conclusion")
+        for entry in runs:
+            if entry["status"] == "completed" and entry["conclusion"] == "success" and passed_on("checks", entry["headSha"]):
+                return entry["headSha"]
+        return None
+    # 50, not 10: a busy hour of merges cancels many runs, which pushes the last finished one out of a short window.
+    runs = gh_json("run", "list", "--repo", REPO, "--workflow", "checks", "--branch", "main", "--event", "push",
+                   "--limit", "50", "--json", "headSha,status,conclusion")
     for entry in runs:
         if entry["status"] == "completed" and entry["conclusion"] != "cancelled":
-            if entry["conclusion"] != "success":
-                return None
-            return entry["headSha"] if not parity or passed_on("checks", entry["headSha"]) else None
+            return entry["headSha"] if entry["conclusion"] == "success" else None
     return None
 
 

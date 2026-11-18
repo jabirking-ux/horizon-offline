@@ -25,7 +25,7 @@ than 10 % apart isn't a fair comparison of its tick times.
 
 The vanilla side runs the pinned server jar from tools/lab.py prepare (your own copy). It needs Java 25. The
 Horizon side runs target/release/horizon-server with the engine beside it; build both first:
-    cargo build --release -p horizon-client --bin horizon-client -p horizon-server -p horizon-bots
+    cargo build --release -p horizon-game --bin horizon-client -p horizon-server -p horizon-bots
 
 Two more Java servers, both dev-only downloads into .local/server-bench/jars (never committed or shipped):
 - `paper`: Paper's newest build for the pinned version, from PaperMC's download API, checked against the
@@ -35,6 +35,15 @@ Two more Java servers, both dev-only downloads into .local/server-bench/jars (ne
 - `fabric`: the pinned vanilla server on the pinned Fabric loader (tools/benchmark-deps/fabric.lock.json) with Lithium from
   tools/benchmark-deps/mods.lock.json (and Fabric API only if Lithium asks for it), checked against the lock's SHA-512.
 Both run with the same heap as vanilla (`--heap`).
+
+`--profile[=ARGS]` has Horizon record its measure window with `horizon-report ARGS` and attaches the run's record with `horizon-perf attach` (docs/hosting.md).
+
+`pumpkin` runs Pumpkin (github.com/Pumpkin-MC/Pumpkin, GPL-3.0), a binary you built yourself and name with
+`--pumpkin`: a black box, nothing of it is read or shipped. A first start in a scratch folder (on 127.0.0.1
+only, without telemetry) writes its default configuration; every run gets that file with the same settings
+as the others (seed, view and simulation distance 10, creative, offline, no encryption, 127.0.0.1) and
+Pumpkin's Bedrock and LAN listeners, query, plugins and telemetry off. docs/performance/server-vs-pumpkin.md
+has the comparison and its commands.
 """
 
 import argparse
@@ -64,6 +73,14 @@ ROOT = lab.ROOT
 EXE = '.exe' if os.name == 'nt' else ''
 # Where horizon-server and horizon-bots are (the engine is found beside horizon-server or on the PATH).
 BIN = Path(os.environ.get('HORIZON_BENCH_BIN', ROOT / 'target/release'))
+
+PERF = BIN / f'horizon-perf{EXE}'
+# The longest window horizon-report records.
+REPORT_MAX_SECONDS = 600
+# What a run's record is called inside the capture it is attached to.
+RUN_RECORD = 'server-bench-run'
+# The line the server logs once the capture is on disk.
+SAVED = re.compile(r'Saved (.+?\.hzperf) \(the file stays')
 
 PROPERTIES = {
     'level-seed': '12345',
@@ -113,14 +130,14 @@ def tree_usage(root):
 class Server:
     """A server with its console on stdin and its output collected."""
 
-    def __init__(self, command, directory, log_path):
+    def __init__(self, command, directory, log_path, env=None):
         self.lines = []
         self.lock = threading.Lock()
         self.log = log_path.open('w', encoding='utf-8')
         self.process = subprocess.Popen([str(c) for c in command], cwd=directory, stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                         encoding='utf-8', errors='replace',
-                                        env=lab.game_env())
+                                        env=lab.game_env(env))
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self):
@@ -167,6 +184,8 @@ class Server:
 # The line every server logs once it is up: vanilla, Fabric and Horizon `[time] [Server thread/INFO]: Done (`,
 # Paper `[time INFO]: Done (`.
 DONE = r'INFO\]: Done \('
+# Pumpkin's, once it listens.
+PUMPKIN_READY = r'Server is now running|Done \('
 TICK_AVERAGE = re.compile(r'Average time per tick: ([0-9.]+) ?ms')
 TICK_PERCENTILES = re.compile(r'P50: ([0-9.]+) ?ms P95: ([0-9.]+) ?ms P99: ([0-9.]+) ?ms')
 
@@ -201,6 +220,111 @@ def fabric_mods():
     if any(d == 'fabric-api' or d.startswith('fabric-') and d != 'fabricloader' for d in depends):
         jars.append(fetch('fabric-api'))
     return jars, {'fabric_loader': lock['fabric_loader'], 'lithium': lock['projects']['lithium']['version']}
+
+
+# What Pumpkin's first start gets: its own defaults listen on every address (and for Bedrock and LAN
+# players) and send telemetry. It fills in the rest of the file.
+PUMPKIN_SEED = '''[networking.java]
+address = "127.0.0.1:{port}"
+online_mode = false
+encryption = false
+
+[networking.query]
+enabled = false
+address = "127.0.0.1:{query}"
+
+[networking.bedrock]
+enabled = false
+
+[networking.bedrock.nethernet]
+enabled = false
+address = "127.0.0.1:0"
+
+[networking.lan_broadcast]
+enabled = false
+
+[networking.management]
+enabled = false
+
+[plugins]
+enabled = false
+
+[telemetry]
+enabled = false
+endpoint = ""
+'''
+
+
+def pumpkin_defaults(exe, out):
+    """Pumpkin's default configuration files (name → text), written by a first start in a scratch folder
+    from PUMPKIN_SEED."""
+    directory = out / 'pumpkin-defaults'
+    shutil.rmtree(directory, ignore_errors=True)
+    directory.mkdir(parents=True)
+    (directory / 'pumpkin.toml').write_text(PUMPKIN_SEED.format(port=lab.free_port(), query=lab.free_port()))
+    server = Server([exe], directory, out / 'pumpkin-defaults.log')
+    try:
+        server.wait_for(PUMPKIN_READY, 600)
+    finally:
+        server.stop()
+    files = {p.relative_to(directory): p.read_text() for p in directory.rglob('*.toml')}
+    if not any('[networking.java]' in t for t in files.values()):
+        raise RuntimeError(f'Pumpkin wrote no [networking.java] configuration in {directory}')
+    shutil.rmtree(directory)
+    return files
+
+
+def pumpkin_config(text, port, args):
+    """Pumpkin's default configuration with the benchmark's settings (PROPERTIES), listening on 127.0.0.1 only,
+    with no Bedrock or LAN listener, query, plugins or telemetry.
+
+    Every declared key is written with its declared value: a key the template already has is replaced in place,
+    a missing one is inserted, and a missing section is added. Keeping an absent key out of the output would
+    silently leave Pumpkin's upstream default in place instead of applying the benchmark's setting.
+    """
+    top = {'seed': f'"{args.seed}"', 'default_difficulty': '"Easy"', 'default_gamemode': '"Creative"',
+           'force_gamemode': 'true', 'spawn_protection': '0', 'white_list': 'false', 'use_tty': 'false'}
+    sections = {
+        'logging': {'color': 'false'},
+        'networking.java': {'address': f'"127.0.0.1:{port}"', 'online_mode': 'false', 'encryption': 'false',
+                            'max_players': '200', 'view_distance': PROPERTIES['view-distance'],
+                            'simulation_distance': PROPERTIES['simulation-distance']},
+        'networking.java.authentication': {'enabled': 'false'},
+        'networking.java.authentication.textures': {'enabled': 'false'},
+        'networking.query': {'enabled': 'false', 'address': f'"127.0.0.1:{port + 1}"'},
+        'networking.management': {'enabled': 'false'},
+        'networking.bedrock': {'enabled': 'false'},
+        'networking.bedrock.nethernet': {'enabled': 'false', 'address': '"127.0.0.1:0"'},
+        'networking.lan_broadcast': {'enabled': 'false'},
+        'plugins': {'enabled': 'false'},
+        'telemetry': {'enabled': 'false', 'endpoint': '""'},
+    }
+    def setting(body, key, value):
+        """Replace key in a TOML body; insert it (preserving trailing whitespace) when it is absent."""
+        pattern = r'(?m)^[ \t]*' + re.escape(key) + r'[ \t]*=[ \t]*.*$'
+        line = f'{key} = {value}'
+        if re.search(pattern, body):
+            return re.sub(pattern, line, body)
+        stripped = body.rstrip('\n')
+        trailing = body[len(stripped):] or '\n'
+        return stripped + ('\n' if stripped else '') + line + trailing
+    first_table = re.search(r'(?m)^[ \t]*\[', text)
+    head = text[:first_table.start()] if first_table else text
+    rest = text[len(head):]
+    for key, value in top.items():
+        head = setting(head, key, value)
+    for name, settings in sections.items():
+        m = re.search(r'(?ms)^[ \t]*\[' + re.escape(name) + r'\][ \t]*(?:#[^\n]*)?(?:\n|\Z)'
+                      r'(.*?)(?=^[ \t]*\[|\Z)', rest)
+        if not m:
+            # The template does not declare this section at all: add it with every declared key.
+            rest = rest.rstrip('\n') + '\n[' + name + ']\n' + ''.join(f'{k} = {v}\n' for k, v in settings.items())
+            continue
+        body = m.group(1)
+        for key, value in settings.items():
+            body = setting(body, key, value)
+        rest = rest[:m.start(1)] + body + rest[m.end(1):]
+    return head + rest
 
 
 def tick_query(server):
@@ -238,9 +362,11 @@ def server_command(kind, directory, args):
         mojang = cache / f'mojang_{lock["minecraft"]["version"]}.jar'
         if not mojang.exists():
             shutil.copyfile(jars['server'].parent / 'server.jar', mojang)
-        for name in ('cache', 'libraries', 'versions'):
+        for name in ('libraries', 'versions'):
             (shared / name).mkdir(exist_ok=True)
-            (directory / name).symlink_to(shared / name, target_is_directory=True)
+        # Paperclip keeps cache/, libraries/ and versions/ under bundlerRepoDir: no folder links, which some
+        # network shares refuse.
+        java.append(f'-DbundlerRepoDir={shared}')
         # Paper refuses a second login from one address within 4 s (bukkit.yml's connection-throttle), and
         # every bot comes from the same one. Off, as on vanilla; Paper fills in the rest of the file.
         (directory / 'bukkit.yml').write_text('settings:\n  connection-throttle: -1\n')
@@ -254,13 +380,79 @@ def server_command(kind, directory, args):
         classpath = os.pathsep.join(map(str, [jars['server'], *libraries, *runtime.fabric_libraries()]))
         return [*java, '-Dfabric.log.disableAnsi=true', '-cp', classpath,
                 'net.fabricmc.loader.impl.launch.knot.KnotServer', 'nogui']
+    if kind == 'pumpkin':
+        if not args.pumpkin:
+            raise RuntimeError('--pumpkin names the Pumpkin binary to run')
+        if args.pumpkin_files is None:
+            args.pumpkin_files = pumpkin_defaults(args.pumpkin, directory.parent)
+        for name, text in args.pumpkin_files.items():
+            (directory / name).parent.mkdir(parents=True, exist_ok=True)
+            (directory / name).write_text(pumpkin_config(text, args.port, args) if '[networking.java]' in text else text)
+        return [args.pumpkin]
     server = BIN / f'horizon-server{EXE}'
     subprocess.run([server, '--dir', directory, 'import', directory / 'server.properties'], check=True,
                    capture_output=True)
     toml = directory / 'server.toml'
     # The same settings, without the web panel.
     toml.write_text(re.sub(r'(?m)^bind = "127\.0\.0\.1:8130"', 'bind = ""', toml.read_text()))
+    if args.anticheat:
+        # Every check on with its defaults (docs/anticheat.md), to measure what it costs. The bots move
+        # by their own rules, not vanilla's: the prediction plays every move again but, with this
+        # tolerance, flags none (an honest player's moves agree).
+        toml.write_text(toml.read_text()
+                        + '\n[anticheat]\nenabled = true\n[anticheat.prediction]\ntolerance = 1000.0\n')
+    else:
+        # The anticheat is on by default: off, to measure the server without it.
+        toml.write_text(toml.read_text() + '\n[anticheat]\nenabled = false\n')
+    if args.dab:
+        # Mob AI far from players (docs/hosting.md): the defaults of Pufferfish's DAB.
+        toml.write_text(toml.read_text() + '\n[entities]\ndab = true\n')
     return [server, '--dir', directory, 'run']
+
+
+def report_line(seconds, extra=''):
+    """The console line that records the measure window; the game ends a report at REPORT_MAX_SECONDS."""
+    return ' '.join(['horizon-report', str(min(seconds, REPORT_MAX_SECONDS)), *extra.split()])
+
+
+def saved_capture(lines, directory):
+    """The capture the server said it saved (it prints the path from its own folder), or None."""
+    for line in lines:
+        if found := SAVED.search(line):
+            return directory / found.group(1)
+    return None
+
+
+def attach_run(capture, record, directory, run=subprocess.run):
+    """Adds the run's record to the capture as an attachment, with horizon-perf."""
+    body = directory / 'run-record.json'
+    body.write_text(json.dumps(record))
+    run([PERF, 'attach', capture, '--name', RUN_RECORD, '--body', body], check=True, capture_output=True, text=True)
+
+
+def start_profile(server, kind, args):
+    """Has Horizon's console record the measure window; true when it was asked to (only Horizon writes captures)."""
+    if args.profile is None or kind != 'horizon':
+        return False
+    server.console(report_line(args.seconds, args.profile))
+    return True
+
+
+def finish_profile(server, directory, result, run=subprocess.run):
+    """Waits for the capture and attaches the run's record to it; a failure is noted, the run stands."""
+    try:
+        server.wait_for(SAVED.pattern, 120)
+        capture = saved_capture(server.since(0), directory)
+        attach_run(capture, {k: v for k, v in result.items() if k != 'bots_failed'}, directory, run)
+        result['profile'] = str(capture)
+    except (RuntimeError, subprocess.CalledProcessError, OSError) as e:
+        result['profile_error'] = str(e)
+
+
+def flag_count(directory):
+    """The lines of Horizon's anticheat log: one a flag (none when it is off)."""
+    log = directory / 'logs/anticheat.log'
+    return len(log.read_text().splitlines()) if log.exists() else 0
 
 
 def bots_command(args):
@@ -270,13 +462,35 @@ def bots_command(args):
     return [args.bots_bin or BIN / f'horizon-bots{EXE}']
 
 
+def populate(server, spec, seed):
+    """Fills the level around the players with `spec` = "items,carts,mobs" (counts), as a busy server has it: the
+    entity tracker and the entity states cost by what is in the level, not only by how many players walk in it.
+    Each one goes at a random offset of up to 120 blocks from a random player: the offsets
+    come from the same seed on every run, but `execute at @r` picks the player with the server's own RNG, so the
+    placements still differ between runs."""
+    import random
+    rng = random.Random(seed)
+    counts = [int(n) for n in (spec.split(',') + ['0', '0'])[:3]]
+    things = [
+        ('item', '{Item:{id:"minecraft:cobblestone",count:1},Age:-32768s}'),
+        ('minecart', ''),
+        ('chicken', '{PersistenceRequired:1b}'),
+    ]
+    for count, (kind, data) in zip(counts, things):
+        for _ in range(count):
+            dx, dz = rng.randint(-120, 120), rng.randint(-120, 120)
+            server.console(f'execute at @r run summon {kind} ~{dx} ~3 ~{dz} {data}'.rstrip())
+
+
 def run_once(kind, bots, behaviour, args, out):
     name = f'{kind}-{behaviour}-{bots}'
     directory = out / name
     shutil.rmtree(directory, ignore_errors=True)
     directory.mkdir(parents=True)
-    port = lab.free_port()
+    port = args.port = lab.free_port()
     props = dict(PROPERTIES, **{'server-port': str(port), 'level-seed': str(args.seed)})
+    if args.ground:
+        props.update({'level-type': 'minecraft\\:flat', 'generate-structures': 'false', 'gamemode': 'survival'})
     (directory / 'server.properties').write_text(''.join(f'{k}={v}\n' for k, v in props.items()))
     (directory / 'eula.txt').write_text('eula=true\n')
     command = server_command(kind, directory, args)
@@ -286,26 +500,42 @@ def run_once(kind, bots, behaviour, args, out):
     server = Server(command, directory, out / f'{name}.log')
     result = {'server': kind, 'bots': bots, 'behaviour': behaviour}
     try:
-        server.wait_for(DONE, 600)
+        server.wait_for(PUMPKIN_READY if kind == 'pumpkin' else DONE, 600)
         result['start_seconds'] = round(time.time() - started, 2)
         # Every bot appears on the world spawn itself, not spread around it, so both servers see the same paths.
         server.console('gamerule respawn_radius 0')
         for rule in filter(None, args.gamerule.split(',')):
             server.console('gamerule ' + rule.replace('=', ' '))
+        if args.farm:
+            # A farm of mobs ~100 blocks east of the spawn, inside the simulation distance and far from
+            # the bots: the mobs a player is not near, which DAB slows. Cows and villagers (zombies would burn in daylight), two blocks apart so cramming leaves them be.
+            for i in range(args.farm):
+                x, z = 90 + i % 40 * 2, -80 + i // 40 * 2
+                kind = 'minecraft:villager' if i % 2 else 'minecraft:cow'
+                server.console(f'summon {kind} {x} 100 {z} {{PersistenceRequired:1b}}')
         time.sleep(5)
         report = out / f'{name}-bots.json'
         total = bots * args.join_every + args.warmup + args.seconds
         # The summary comes back on stdout after the per-second lines, so it works over ssh too.
-        bot_process = subprocess.Popen(
-            [*bots_command(args), '--server', f'{args.connect}:{port}', '--bots', str(bots),
+        # No bots: the idle server, measured the same way.
+        bot_process = subprocess.Popen(['true'] if bots == 0 else [
+             *bots_command(args), '--server', f'{args.connect}:{port}', '--bots', str(bots),
              '--behaviour', behaviour, '--join-every', str(args.join_every), '--seconds', str(int(total)),
              '--seed', str(args.seed), '--report', '-',
-             *(['--explore-speed', str(args.explore_speed)] if args.explore_speed else [])],
+             *(['--explore-speed', str(args.explore_speed)] if args.explore_speed else []),
+             *(['--height', '0', '--ground'] if args.ground else []),
+             *(['--capture', str(args.capture)] if args.capture else [])],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         bot_lines = []
         threading.Thread(target=lambda: bot_lines.extend(bot_process.stdout), daemon=True).start()
         # All bots in, then the warm-up.
-        time.sleep(bots * args.join_every + args.warmup)
+        if args.entities:
+            time.sleep(bots * args.join_every)
+            populate(server, args.entities, args.seed)
+            time.sleep(args.warmup)
+        else:
+            time.sleep(bots * args.join_every + args.warmup)
+        profiling = start_profile(server, kind, args)
         measure_start = time.time()
         rss, cpu, ticks = [], [], []
         _, last_cpu = tree_usage(server.process.pid)
@@ -332,6 +562,9 @@ def run_once(kind, bots, behaviour, args, out):
                 sample = None
             if isinstance(sample, dict) and 't' in sample:
                 measured.append(sample)
+            elif isinstance(sample, dict) and set(sample) == {'spawn'}:
+                # The first bot's spawn position (horizon-bots prints it for perf_bench --server-bots).
+                continue
             else:
                 rest.append(line)
         window = [l for l in measured if l['t'] >= measured[-1]['t'] - args.seconds] if measured else []
@@ -363,11 +596,16 @@ def run_once(kind, bots, behaviour, args, out):
             'resent': summary.get('resent'),
             'pulled_back': summary.get('pulled_back'),
             'moved_too_quickly': sum('moved too quickly!' in l for l in server.since(0)),
+            'anticheat_flags': flag_count(directory),
             'moved_wrongly': sum('moved wrongly!' in l for l in server.since(0)),
             'bots_joined': summary.get('joined'),
+            # From the bot's first packet to its spawn position, in ms.
+            'join_ms': summary.get('join_time'),
             'bots_failed': [b for b in summary.get('per_bot', []) if b.get('error')],
             'tick_queries': len(ticks),
         })
+        if profiling:
+            finish_profile(server, directory, result)
     except Exception as e:  # a failed run is reported, and the next one still runs
         result['error'] = str(e)
     finally:
@@ -387,12 +625,12 @@ def work(runs):
     groups = {}
     for r in runs:
         if 'error' not in r:
-            groups.setdefault((r['behaviour'], r['bots']), []).append(r)
+            groups.setdefault((r['behaviour'], r['bots'], r.get('round', 0)), []).append(r)
     rows = []
-    for (behaviour, bots), group in groups.items():
+    for (behaviour, bots, round_), group in groups.items():
         if len(group) < 2:
             continue
-        row = {'behaviour': behaviour, 'bots': bots, 'servers': {}, 'equal': True}
+        row = {'behaviour': behaviour, 'bots': bots, 'round': round_, 'servers': {}, 'equal': True}
         for key in ('chunks_per_second', 'unique_per_second'):
             top = max(r.get(key) or 0 for r in group)
             for r in group:
@@ -419,10 +657,11 @@ def versions(kinds):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    parser.add_argument('--servers', default='horizon,vanilla', help='horizon, vanilla, paper, fabric (Lithium)')
+    parser.add_argument('--servers', default='horizon,vanilla', help='horizon, vanilla, paper, fabric (Lithium), pumpkin')
     parser.add_argument('--bots', default='1,10,25,50')
     parser.add_argument('--behaviour', default='walk,explore', help='one pass per behaviour (comma-separated)')
     parser.add_argument('--join-every', type=float, default=1.0)
+    parser.add_argument('--capture', type=Path, help='capture first bot play packets for protocol replay (overwritten each run)')
     parser.add_argument('--warmup', type=int, default=60)
     parser.add_argument('--seconds', type=int, default=300)
     parser.add_argument('--seed', type=int, default=12345)
@@ -432,23 +671,43 @@ def main():
     parser.add_argument('--gamerule', default='',
                         help="more game rules for both servers, 'name=value,...' (locator_bar=false: Horizon has "
                              "no locator bar yet)")
+    parser.add_argument('--entities', default='', metavar='ITEMS,CARTS,MOBS',
+                        help='fill the level with this many dropped items, minecarts and chickens once the bots are in')
     parser.add_argument('--heap', default='4g', help='the Java heap, -Xms and -Xmx (vanilla, Paper, Fabric)')
     parser.add_argument('--out', type=Path, default=None, help='the report (JSON)')
     parser.add_argument('--nice', type=int, default=0, help='run the servers under nice -n N')
+    parser.add_argument('--dab', action='store_true',
+                        help="turn Horizon's mob AI throttling on (server.toml [entities] dab); Horizon only")
+    parser.add_argument('--farm', type=int, default=0,
+                        help='summon this many mobs ~100 blocks from the spawn, away from the bots (the DAB fixture)')
+    parser.add_argument('--anticheat', action='store_true',
+                        help="turn Horizon's anticheat on (server.toml [anticheat]); its flags are counted")
+    parser.add_argument('--ground', action='store_true',
+                        help='a flat survival world, the bots walking on its ground and saying so in every move '
+                             "(what the anticheat's ground check judges)")
     parser.add_argument('--bots-via', default='', help="a command prefix to run the bots elsewhere ('ssh host')")
     parser.add_argument('--bots-bin', default='', help='horizon-bots (on the --bots-via machine)')
     parser.add_argument('--connect', default='127.0.0.1', help='the address the bots reach the server at')
+    parser.add_argument('--pumpkin', type=Path, default=None, help='the Pumpkin binary (--servers pumpkin)')
+    parser.add_argument('--profile', nargs='?', const='', default=None, metavar='ARGS',
+                        help="record Horizon's measure window with horizon-report (ARGS: its flags, as "
+                             "--profile=--no-samples) and attach the run's record to the capture")
+    parser.add_argument('--repeat', type=int, default=1,
+                        help='rounds: every server and bot count once per round, the servers alternated')
     args = parser.parse_args()
+    args.pumpkin_files = None
     out = lab.LOCAL / 'server-bench'
     out.mkdir(parents=True, exist_ok=True)
     runs = []
-    for behaviour in args.behaviour.split(','):
-        for bots in [int(b) for b in args.bots.split(',')]:
-            for kind in args.servers.split(','):
-                print(f'{kind}, {bots} {behaviour} bots...', flush=True)
-                result = run_once(kind, bots, behaviour, args, out)
-                runs.append(result)
-                print(json.dumps(result), flush=True)
+    for round_ in range(args.repeat):
+        for behaviour in args.behaviour.split(','):
+            for bots in [int(b) for b in args.bots.split(',')]:
+                for kind in args.servers.split(','):
+                    print(f'{kind}, {bots} {behaviour} bots...', flush=True)
+                    result = run_once(kind, bots, behaviour, args, out)
+                    result['round'] = round_
+                    runs.append(result)
+                    print(json.dumps(result), flush=True)
     report = {
         'kind': 'horizon-server-benchmark',
         'date': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
@@ -456,7 +715,9 @@ def main():
         'commit': subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True, text=True).stdout.strip(),
         'java': subprocess.run(['java', '--version'], capture_output=True, text=True).stdout.splitlines()[:1],
         'versions': versions(args.servers.split(',')),
-        'settings': {**vars(args), 'out': str(args.out), 'properties': PROPERTIES},
+        'settings': {**{k: v for k, v in vars(args).items() if k != 'pumpkin_files'}, 'out': str(args.out),
+                     'pumpkin': str(args.pumpkin) if args.pumpkin else None,
+                     'capture': str(args.capture) if args.capture else None, 'properties': PROPERTIES},
         'runs': runs,
         'work': work(runs),
     }
@@ -464,17 +725,17 @@ def main():
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, indent=2) + '\n')
     print(f'\n{"server":8} {"pass":8} {"bots":>4} {"start s":>8} {"MSPT":>6} {"P95":>6} {"P99":>6} {"RSS MB":>7} '
-          f'{"CPU %":>6} {"chunks/s":>8} {"/bot":>6} {"resent":>6} {"pulled":>6} {"joined":>6}')
+          f'{"CPU %":>6} {"chunks/s":>8} {"/bot":>6} {"resent":>6} {"pulled":>6} {"joined":>6} {"join ms":>7}')
     for r in runs:
         if 'error' in r:
             print(f'{r["server"]:8} {r["behaviour"]:8} {r["bots"]:>4}  failed: {r["error"].splitlines()[0]}')
             continue
         # A mixed pass: every bot's.
-        per_bot = r['chunks_per_bot'].get(r['behaviour']) or round((r['chunks_total'] or 0) / r['bots'])
+        per_bot = r['chunks_per_bot'].get(r['behaviour']) or round((r['chunks_total'] or 0) / max(r['bots'], 1))
         print(f'{r["server"]:8} {r["behaviour"]:8} {r["bots"]:>4} {r["start_seconds"]:>8} {r["mspt"]["average"]!s:>6} '
               f'{r["mspt"]["p95"]!s:>6} {r["mspt"]["p99"]!s:>6} {r["rss_mb"]["mean"]!s:>7} {r["cpu_percent"]!s:>6} '
               f'{r["chunks_per_second"]!s:>8} {per_bot!s:>6} {r["resent"]!s:>6} {r["pulled_back"]!s:>6} '
-              f'{r["bots_joined"]!s:>6}')
+              f'{r["bots_joined"]!s:>6} {(r.get("join_ms") or {}).get("p50_ms")!s:>7}')
     if report['work']:
         print(f'\nWork, against the busiest server (chunks a second sent, new; ticks a second bots waited):')
         for row in report['work']:

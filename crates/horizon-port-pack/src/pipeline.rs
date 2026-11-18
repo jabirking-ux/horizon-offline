@@ -1,7 +1,7 @@
 //! The steps on a work folder, as the command line and the launcher run
 //! them. Each one reads what the earlier steps wrote and says what it did
 //! through `log`, one line at a time.
-use crate::{carry, fetch, import, inventory, modrinth, oracle, report};
+use crate::{carry, datapacks, fetch, import, inventory, modrinth, oracle, report};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -22,9 +22,14 @@ pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, Strin
 }
 
 /// Step 1: the pack at `pack` to `<work>/pack.json`.
-pub fn import(pack: &Path, work: &Path, log: Log) -> Result<import::Pack, String> {
-    let pack = import::import(pack)?;
+pub fn import(source: &Path, work: &Path, log: Log) -> Result<import::Pack, String> {
+    let pack = import::import_with_jars(source, Some(work))?;
     fs::create_dir_all(work).map_err(|e| format!("{}: {e}", work.display()))?;
+    // A bad resource-pack entry must not stop the pack's mods from importing.
+    match crate::resourcepacks::stage(source, work, &pack).and_then(|r| r.save(work)) {
+        Ok(()) => {}
+        Err(e) => log(format!("resource packs not staged: {e}")),
+    }
     write_json(&work.join("pack.json"), &pack)?;
     let mut kinds = BTreeMap::<&str, usize>::new();
     for f in &pack.files {
@@ -91,6 +96,12 @@ fn vanilla_blocks(resources: &Path) -> Result<BTreeSet<String>, String> {
     Ok(defaults.keys().cloned().collect())
 }
 
+/// The pack's Minecraft version, empty when it can't be read.
+fn minecraft(work: &Path) -> String {
+    read_json::<import::Pack>(&work.join("pack.json"))
+        .map_or_else(|_| String::new(), |p| p.minecraft)
+}
+
 /// Step 4: the content mods with a jar (or the ones in `only`) carried over
 /// into `<work>/mods/<id>/carry/`. Returns how many were.
 pub fn carry(
@@ -102,7 +113,12 @@ pub fn carry(
     let records: Vec<inventory::Record> = read_json(&work.join("inventory.json"))?;
     let facts_path = work.join("oracle/facts.json");
     let facts = if facts_path.exists() {
-        let f = oracle::Facts::read(&facts_path)?;
+        let mut f = oracle::Facts::read(&facts_path)?;
+        if let Some(r) = resources {
+            f.vanilla_items = read_json(&r.join("items.json"))
+                .inspect_err(|e| log(format!("items patched without the game's tables: {e}")))
+                .unwrap_or_default();
+        }
         log(format!(
             "oracle facts: {} blocks, {} items",
             f.blocks.len(),
@@ -120,12 +136,15 @@ pub fn carry(
     });
     let allowed = |b: &str| vanilla.as_ref().is_none_or(|v| v.contains(b));
     let conventions = crate::worldgen::loader_biome_tags(work);
+    let minecraft = minecraft(work);
+    // A data-only jar is a data pack (`datapacks`), never also a content mod.
     let chosen = |r: &inventory::Record| {
-        if only.is_empty() {
-            r.class == "content"
-        } else {
-            only.contains(&r.key)
-        }
+        !datapacks::is_data_only(r, &minecraft)
+            && if only.is_empty() {
+                r.class == "content"
+            } else {
+                only.contains(&r.key)
+            }
     };
     // The mods ported along (carried now or before), for the conditions of
     // the mods' worldgen modifiers.
@@ -235,9 +254,7 @@ pub fn loadable(mods: &[std::path::PathBuf]) -> (Vec<std::path::PathBuf>, Vec<St
     let mut on: Vec<(std::path::PathBuf, String, Vec<String>)> = Vec::new();
     let mut off = Vec::new();
     for path in mods {
-        let manifest = fs::read_to_string(path.join(horizon_mods::manifest::MANIFEST))
-            .map_err(|e| e.to_string())
-            .and_then(|t| horizon_mods::Manifest::parse(&t));
+        let manifest = horizon_mod_package::Package::read(path).map(|package| package.manifest);
         let m = match manifest {
             Ok(m) => m,
             Err(e) => {
@@ -250,7 +267,7 @@ pub fn loadable(mods: &[std::path::PathBuf]) -> (Vec<std::path::PathBuf>, Vec<St
             .collect();
         let clash = on
             .iter()
-            .find_map(|(_, id, ns)| horizon_mods::content::clash((id, ns), (&m.id, &owned)));
+            .find_map(|(_, id, ns)| horizon_mod_package::content::clash((id, ns), (&m.id, &owned)));
         match clash {
             Some(why) => off.push(format!("{} not loaded: {why}", m.id)),
             None => on.push((path.clone(), m.id, owned)),
@@ -322,24 +339,28 @@ pub fn port(
     work: &Path,
     resources: Option<&Path>,
     from: Option<&Path>,
+    hosts: &[&str],
     log: Log,
 ) -> Result<(fetch::Fetched, Vec<report::Row>), String> {
     let records = match read_json::<Vec<inventory::Record>>(&work.join("inventory.json")) {
         Ok(r) => r,
         Err(_) => inventory(work, false, log)?,
     };
-    let fetched = fetch::fetch(work, &records, from, &portable, log)?;
+    crate::resourcepacks::fetch(work, hosts, log)?;
+    let fetched = fetch::fetch(work, &records, from, &portable, hosts, log)?;
     // The jars tell classes and tiers better than metadata alone.
     let records = inventory(work, true, log)?;
+    let minecraft = minecraft(work);
+    let packs = datapacks::install(work, &records, &minecraft, log)?;
     let only: Vec<String> = records
         .iter()
-        .filter(|r| portable(r) && r.jar.is_some())
+        .filter(|r| portable(r) && r.jar.is_some() && !datapacks::is_data_only(r, &minecraft))
         .map(|r| r.key.clone())
         .collect();
-    if only.is_empty() {
-        log("no portable mod has its jar: nothing to carry over".into());
-    } else {
+    if !only.is_empty() {
         carry(work, resources, &only, log)?;
+    } else if packs == 0 {
+        log("no portable mod has its jar: nothing to carry over".into());
     }
     Ok((fetched, report(work, log)?))
 }
@@ -347,6 +368,32 @@ pub fn port(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_resources_without_items_json_still_carry() {
+        let root = std::env::temp_dir().join(format!("port-pack-no-items-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (work, resources) = (root.join("work"), root.join("resources"));
+        fs::create_dir_all(work.join("oracle")).unwrap();
+        fs::create_dir_all(&resources).unwrap();
+        fs::write(work.join("inventory.json"), "[]").unwrap();
+        fs::write(
+            work.join("oracle/facts.json"),
+            r#"{"blocks": {}, "items": {}}"#,
+        )
+        .unwrap();
+        let logged = std::cell::RefCell::new(Vec::new());
+        let log = |line: String| logged.borrow_mut().push(line);
+        assert_eq!(carry(&work, Some(&resources), &[], &log), Ok(0));
+        let logged = logged.borrow();
+        assert!(
+            logged
+                .iter()
+                .any(|l| l.contains("without the game's tables")),
+            "{logged:?}"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn a_namespace_two_mods_claim_is_neither_s() {
@@ -388,6 +435,14 @@ mod tests {
         assert_eq!(on, [mods[0].clone(), mods[2].clone()]);
         assert_eq!(off.len(), 1);
         assert!(off[0].starts_with("betterfortresses not loaded"), "{off:?}");
+        // An invalid first package must not claim the shared namespace.
+        let asset = mods[0].join("assets/betterdungeons/model.bin");
+        fs::create_dir_all(asset.parent().unwrap()).unwrap();
+        fs::write(asset, b"\0asm").unwrap();
+        let (on, off) = loadable(&mods);
+        assert_eq!(on, [mods[1].clone(), mods[2].clone()]);
+        assert_eq!(off.len(), 1);
+        assert!(off[0].contains("unsupported executable file"), "{off:?}");
         fs::remove_dir_all(&root).unwrap();
     }
 }

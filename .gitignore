@@ -21,6 +21,7 @@
 .DS_Store
 # What the client writes to its working directory when run from the repo root.
 /options.txt
+/debug-profile.json
 /horizon.txt
 /horizon-graphics.txt
 /horizon-controller.txt
@@ -29,11 +30,16 @@
 /servers.dat
 /screenshots/
 /.horizon-cache/
+# The same cache real-Game tests write, from the crate's own directory.
+/crates/horizon-client/.horizon-cache/
+/crates/horizon-client/horizon-player.txt
 /crash-reports/
 /debug/
 
 # Release-only compiled original exporter bundle.
 /exporters/
-*.exe
+# A local build's Microsoft client ID (launcher/build.rs): never committed.
+/launcher/.msa-client-id
 
-/.cargo/
+# Visual Studio editor state.
+.vs/

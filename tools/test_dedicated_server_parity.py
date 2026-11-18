@@ -30,7 +30,7 @@ exactly:
   brand (Horizon's server says "horizon", vanilla's "vanilla"), features,
   known packs, every registry, tags);
 - the play packets up to the first chunk batch, in order, with entity ids,
-  keep-alive ids and times left out (the recipe property sets and
+  keep-alive ids and times and the anticheat's pings left out (the recipe property sets and
   advancements, which vanilla keeps in hash maps, sorted); the command tree
   node by node; the chunks sent and their bytes; the replies to the chat
   message, /list and the failing commands, as text components;
@@ -85,6 +85,7 @@ NAME = 'dedicated-server-parity'
 SEED = 12345
 PLAYER = 'Tester'
 PROPERTIES = {
+    'server-ip': '127.0.0.1',
     'online-mode': 'false',
     'white-list': 'false',
     'level-seed': str(SEED),
@@ -239,6 +240,7 @@ def legacy_ping(port):
 
 
 CONSOLE_LINE = re.compile(r'^\[\d\d:\d\d:\d\d\] \[([^\]]+)\]: (.*)$')
+PLAY_PING = re.compile(r'play-\S* minecraft:ping\b')
 KEPT = re.compile(r'Tester|\[Server\]|\[Not Secure\]|There are|Stopping|Saving|ThreadedAnvilChunkStorage|All dimensions|Unknown or incomplete')
 
 
@@ -304,10 +306,27 @@ def server_files(directory):
     return out
 
 
+def forced_chunk_barrier(server, label):
+    # ServerLevel.setChunkForced loads a newly forced column before returning.
+    # A block-region self-comparison first checks FULL chunk presence. Unlike
+    # `execute if loaded`, it does not also require entities to be ticking.
+    # Queue it without waiting for generation or polling readiness.
+    server.console('forceload add 20000 20000')
+    region = '20000 100 20000 20000 100 20000 20000 100 20000 all'
+    server.console(f'execute if blocks {region} run say forced chunk ready')
+    server.console(f'execute unless blocks {region} run say forced chunk missing')
+    server.console('say forced chunk barrier checked')
+    server.wait_for(r'\[Server\] forced chunk barrier checked', timeout=120)
+    assert any('[Server] forced chunk ready' in line for line in server.lines), label
+    assert not any('[Server] forced chunk missing' in line for line in server.lines), label
+    server.console('forceload remove 20000 20000')
+
+
 def run_side(label, command, directory, client):
     server = Server(command, directory, label)
     try:
         server.wait_for(r'Done \(')
+        forced_chunk_barrier(server, label)
         # A librarian beside the spawn for the client to trade with (no AI:
         # it stays put; experience keeps its profession).
         server.console('summon minecraft:villager ~1 ~ ~ {NoAI:1b,Xp:1,VillagerData:'
@@ -354,6 +373,9 @@ def run_side(label, command, directory, client):
     finally:
         server.stop()
     transcript = (directory.parent / f'{label}-client.txt').read_text(encoding='utf-8').splitlines()
+    # Horizon's anticheat, on by default, ends each server tick with a play ping for its movement
+    # prediction (docs/anticheat.md); vanilla's server sends none, and a client only answers them.
+    transcript = [l for l in transcript if not PLAY_PING.match(l)]
     return (['legacy-ping ' + legacy] + transcript + ['console ' + l for l in console_lines(server.lines)]
             + ['file ' + l for l in server_files(directory)])
 
@@ -425,7 +447,7 @@ def main():
     oh.run_logged(['javac', '--release', lock['minecraft']['java_major'], '-proc:none', '-nowarn', '-sourcepath',
                    lab.ROOT / 'mods/horizon/src/test/java', '-cp', dependencies, '-d', classes, oracle],
                   build, 'compile-java')
-    oh.run_logged(['cargo', 'build', '--profile', 'fast', '-p', 'horizon-client', '--bin', 'horizon-client'], build,
+    oh.run_logged(['cargo', 'build', '--profile', 'fast', '-p', 'horizon-game', '--bin', 'horizon-client'], build,
                   'compile-rust')
     metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--no-deps', '--format-version', '1'],
                                                   cwd=lab.ROOT, text=True))

@@ -37,6 +37,33 @@ fn name(n: &str) -> Tag {
 }
 
 #[test]
+fn active_worlds_cannot_be_backed_up_copied_or_deleted() {
+    let home = scratch("active-lock");
+    let dir = world(&home, "Active", vec![("LevelName", name("Active"))]);
+    let w = find(&home, "Active").unwrap();
+    let game = fs::File::options()
+        .write(true)
+        .open(dir.join(LOCK))
+        .unwrap();
+    game.try_lock().unwrap();
+
+    assert!(backup(&home, &w).is_err());
+    assert!(copy(&w).is_err());
+    assert!(delete(&w).is_err());
+    assert!(!home.join("backups").exists());
+    assert!(!home.join("saves/Active (1)").exists());
+    assert_eq!(fs::read(dir.join("region/r.0.0.mca")).unwrap(), [7u8; 1000]);
+
+    // As the game does when it closes; dropping alone could leave it held by a process another
+    // test is starting.
+    game.unlock().unwrap();
+    drop(game);
+    assert!(backup(&home, &w).unwrap().is_file());
+    assert!(copy(&w).unwrap().path.is_dir());
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
 fn lists_what_each_world_is() {
     let home = scratch("list");
     let survival = world(
@@ -111,7 +138,10 @@ fn a_backup_is_named_and_laid_out_as_vanillas() {
         home.join("backups/2026-10-27_01-02-03_World (1).zip")
     );
     let mut zip = zip::ZipArchive::new(fs::File::open(&first).unwrap()).unwrap();
-    let mut entries: Vec<String> = zip.file_names().map(str::to_string).collect();
+    let mut entries: Vec<String> = zip
+        .file_names()
+        .map(|name| name.unwrap().into_owned())
+        .collect();
     entries.sort();
     assert_eq!(entries, ["World/level.dat", "World/region/r.0.0.mca"]);
     let mut region = Vec::new();
@@ -154,4 +184,44 @@ fn a_copy_gets_the_next_free_name_in_its_folder_and_level_dat() {
         ("Named (1)", "Named (1)")
     );
     fs::remove_dir_all(&home).unwrap();
+}
+
+#[test]
+fn the_mods_a_world_was_saved_with_are_read_and_matched() {
+    let home = scratch("saved-mods");
+    let record = |id: &str| Tag::compound([("ModId", name(id)), ("ModVersion", name("1.0.0"))]);
+    let dir = home.join("saves").join("Home");
+    fs::create_dir_all(&dir).unwrap();
+    let root = Tag::compound([
+        ("Data", Tag::compound([("LevelName", name("Home"))])),
+        (
+            "fml",
+            Tag::compound([("LoadingModList", Tag::List(vec![record("greeter")]))]),
+        ),
+        (
+            "horizon",
+            Tag::compound([("ContentModList", Tag::List(vec![record("bricks")]))]),
+        ),
+    ]);
+    let bytes = nbt::write_named(
+        &nbt::NamedTag {
+            name: "".into(),
+            tag: root,
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    fs::write(dir.join("level.dat"), bytes).unwrap();
+    world(&home, "Plain", vec![("LevelName", name("Plain"))]);
+    let all = list(&home);
+    let home_world = all.iter().find(|w| w.folder == "Home").unwrap();
+    assert_eq!(home_world.mods, ["greeter", "bricks"]);
+    let plain = all.iter().find(|w| w.folder == "Plain").unwrap();
+    assert!(plain.mods.is_empty());
+    let at_stake = saved_with(&all, &["greeter".into(), "other".into()]);
+    assert_eq!(at_stake.len(), 1);
+    assert_eq!(at_stake[0].0.name, "Home");
+    assert_eq!(at_stake[0].1, ["greeter"]);
+    assert!(saved_with(&all, &["other".into()]).is_empty());
+    fs::remove_dir_all(home).unwrap();
 }

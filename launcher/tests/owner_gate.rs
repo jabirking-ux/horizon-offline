@@ -1,11 +1,13 @@
-//! Tests that the MSA owner gate has been removed: offline launch does not require
-//! a Microsoft account or keychain persistence.
+//! The owner gate from the outside: with no account that owns Minecraft: Java Edition in the
+//! launcher, neither `horizon-launcher play` nor the MCP server's play starts the game.
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 const REFUSED: &str = "Sign in with a Microsoft account that owns Minecraft: Java Edition to play.";
 
+/// Fresh homes with one installed (not prepared) version and an offline name from an older
+/// launcher, as a player who played offline before the gate has.
 fn home(name: &str) -> PathBuf {
     let root =
         std::env::temp_dir().join(format!("horizon-owner-gate-{name}-{}", std::process::id()));
@@ -31,7 +33,9 @@ fn launcher(root: &Path, args: &[&str]) -> Command {
         .env("HORIZON_LAUNCHER_NO_SELF_UPDATE", "1")
         .env("HORIZON_NO_AUDIO", "1")
         .env("HORIZON_TELEMETRY_URL", "off")
-        .env("HORIZON_NO_KEYCHAIN", "1");
+        // Memory only: the test never reads the player's keychain.
+        .env("HORIZON_NO_KEYCHAIN", "1")
+        .env("HORIZON_MSA_CLIENT_ID", "test-client");
     cmd
 }
 
@@ -40,20 +44,51 @@ fn text(out: &Output) -> String {
 }
 
 #[test]
-fn the_cli_allows_offline_play_without_msa() {
+fn the_cli_refuses_to_play_without_an_owner() {
     let root = home("cli");
     let out = launcher(&root, &["play"]).output().unwrap();
     let said = text(&out);
-    // In our offline fork, it does not require a Microsoft account sign-in
-    assert!(!said.contains(REFUSED), "{said}");
-    assert!(!said.contains("horizon-launcher account sign-in"), "{said}");
+    assert!(!out.status.success(), "{said}");
+    assert!(said.contains(REFUSED), "{said}");
+    assert!(said.contains("horizon-launcher account sign-in"), "{said}");
+    // Nothing of the game ran, and a refusal doesn't rewrite the accounts.
+    assert!(!root.join("game/sessions").exists());
     let accounts = std::fs::read_to_string(root.join("launcher/accounts.json")).unwrap();
     assert!(accounts.contains("Builder_1"), "{accounts}");
     let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
-fn the_mcp_server_allows_offline_play_without_msa() {
+fn prepare_download_explains_the_sign_in_requirement() {
+    let root = home("prepare-download");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../research-lock.json"),
+        root.join("launcher/versions/v2026.10.27.01/research-lock.json"),
+    )
+    .unwrap();
+    let out = launcher(
+        &root,
+        &["prepare", "--download", "--version", "v2026.10.27.01"],
+    )
+    .current_dir(&root)
+    .env("HOME", &root)
+    .env("HORIZON_LAUNCHER_TRASH", root.join("trash"))
+    .env("HORIZON_LAUNCHER_CLIPBOARD", root.join("clipboard"))
+    .env("HORIZON_LAUNCHER_DESKTOP", root.join("desktop"))
+    .output()
+    .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(out.stdout.is_empty(), "{}", text(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr).trim(),
+        "error: Sign in with a Microsoft account that owns Minecraft: Java Edition to download 26.3 from Mojang."
+    );
+    assert!(!root.join("launcher/minecraft").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_mcp_server_refuses_to_play_without_an_owner() {
     let root = home("mcp");
     let mut child = launcher(&root, &["mcp"])
         .stdin(Stdio::piped())
@@ -76,7 +111,8 @@ fn the_mcp_server_allows_offline_play_without_msa() {
         .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
         .find(|v| v["id"] == 2)
         .expect("a reply to play");
-    let said = format!("{reply}");
-    assert!(!said.contains(REFUSED), "{said}");
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    let said = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(said.contains(REFUSED), "{said}");
     let _ = std::fs::remove_dir_all(&root);
 }

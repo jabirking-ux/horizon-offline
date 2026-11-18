@@ -9,6 +9,10 @@ use super::{
 };
 use horizon_core::random::RandomSource;
 
+#[cfg(test)]
+#[path = "monster_no_action_tests.rs"]
+mod monster_no_action_tests;
+
 pub fn register(m: &mut Mob) {
     use Species as S;
     match m.species() {
@@ -64,8 +68,36 @@ pub fn register(m: &mut Mob) {
             m.ai.targets.add(1, HurtByTarget::new().alert());
             m.ai.targets.add(2, NearestTarget::player(true));
         }
+        // Endermite.registerGoals: the silverfish's list without the stone
+        // tricks, at vanilla's priorities (stroll 1.0, alert others on hurt).
+        S::Endermite => {
+            let g = &mut m.ai.goals;
+            g.add(1, Float);
+            g.add(1, ClimbOnTopOfPowderSnow);
+            g.add(2, MeleeAttack::new(1.0, false));
+            g.add(3, Stroll::avoiding_water(1.0));
+            g.add(7, LookAtPlayer::new(8.0));
+            g.add(8, RandomLookAround::default());
+            m.ai.targets.add(1, HurtByTarget::new().alert());
+            m.ai.targets.add(2, NearestTarget::player(true));
+        }
         _ => {}
     }
+}
+/// `InfestedBlock.isCompatibleHostBlock`: the blocks an infested block can
+/// be hidden in, i.e. the host side of vanilla's host-to-infested map. A
+/// silverfish prefers these as a walking target.
+pub fn is_infested_host(name: &str) -> bool {
+    matches!(
+        name,
+        "minecraft:stone"
+            | "minecraft:cobblestone"
+            | "minecraft:stone_bricks"
+            | "minecraft:mossy_stone_bricks"
+            | "minecraft:cracked_stone_bricks"
+            | "minecraft:chiseled_stone_bricks"
+            | "minecraft:deepslate"
+    )
 }
 /// `Silverfish.hurtServer`: a hit by an entity (or magic damage) starts the
 /// countdown of its wake-up goal, kept in `extra.counter`.
@@ -113,8 +145,13 @@ impl Goal for SilverfishWakeUpFriends {
                     {
                         continue;
                     }
-                    if cx.w.mob_griefing {
-                        cx.events.push(MobEvent::BreakBlock { pos, drop: true });
+                    if cx.w.can_grief(m.id) {
+                        cx.events.push(MobEvent::BreakBlock {
+                            pos,
+                            drop: true,
+                            by: Some(m.id),
+                            breaker: None,
+                        });
                     } else {
                         cx.events.push(MobEvent::Infest {
                             pos,
@@ -157,7 +194,7 @@ impl Goal for SilverfishMergeWithStone {
         if m.ai.target.is_some() || !m.ai.nav.is_done() {
             return false;
         }
-        if cx.w.mob_griefing
+        if cx.w.can_grief(m.id)
             && m.random
                 .next_int_bound(super::goals::reduced(10))
                 .unwrap_or(1)
@@ -214,6 +251,15 @@ pub fn mob_brightness(m: &Mob, w: &MobWorld) -> f32 {
         m.position.z.floor() as i32,
     )
 }
+/// The same with the override a mob can give it: `Blaze` and `Vex` report a
+/// constant 1.0 whatever the light.
+pub fn magic_value(m: &Mob, w: &MobWorld) -> f32 {
+    if matches!(m.species(), Species::Blaze | Species::Vex) {
+        1.0
+    } else {
+        mob_brightness(m, w)
+    }
+}
 fn dark_enough(m: &Mob, w: &MobWorld) -> bool {
     mob_brightness(m, w) < 0.5
 }
@@ -226,12 +272,13 @@ impl Goal for SpiderAttack {
         self.0.flags()
     }
     fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
-        // SpiderAttackGoal.canUse: not while it carries a rider.
-        self.0.can_use(m, cx) && m.extra.rider.is_none()
+        // SpiderAttackGoal.canUse: not while it is a vehicle (`isVehicle`:
+        // a player or a mob on its back).
+        self.0.can_use(m, cx) && m.rider.is_none() && m.extra.rider.is_none()
     }
     fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
         if mob_brightness(m, cx.w) >= 0.5 && m.random.next_int_bound(100).unwrap_or(1) == 0 {
-            m.ai.target = None;
+            m.set_ai_target(cx.w, None);
             return false;
         }
         self.0.can_continue(m, cx)
@@ -303,9 +350,9 @@ pub fn creeper_client_tick(m: &mut Mob) {
     if m.extra.flag {
         m.extra.counter = 1;
     }
-    m.swell = (m.swell + m.extra.counter).clamp(0, 30);
+    m.swell = (m.swell + m.extra.counter).max(0).min(m.max_swell);
 }
-/// Creeper.tick: advance the fuse and explode at 30.
+/// Creeper.tick: advance the fuse and explode at maxSwell.
 pub fn creeper_tick(m: &mut Mob, events: &mut Vec<MobEvent>) {
     if !m.alive() {
         return;
@@ -322,11 +369,19 @@ pub fn creeper_tick(m: &mut Mob, events: &mut Vec<MobEvent>) {
             1.0,
             0.5,
         ));
+        // Creeper.tick: `gameEvent(GameEvent.PRIME_FUSE)` with the sound.
+        events.push(MobEvent::GameEvent {
+            event: "minecraft:prime_fuse",
+            at: [m.position.x, m.position.y, m.position.z],
+            source: m.id,
+            state: horizon_world::registry::BlockStateId(0),
+        });
     }
     m.swell = (m.swell + dir).max(0);
-    if m.swell >= 30 {
-        m.swell = 30;
-        let radius = if m.extra.charged { 6.0 } else { 3.0 };
+    if m.swell >= m.max_swell {
+        m.swell = m.max_swell;
+        // explodeCreeper: `explosionRadius * (isPowered() ? 2.0F : 1.0F)`.
+        let radius = f32::from(m.extra.explosion_radius) * if m.extra.charged { 2.0 } else { 1.0 };
         let name = match &m.custom_name {
             Some(name) => crate::text::Text::literal(name.clone()),
             None => crate::text::Text::translate(
@@ -338,12 +393,125 @@ pub fn creeper_tick(m: &mut Mob, events: &mut Vec<MobEvent>) {
             mob: m.id,
             charged: m.extra.charged,
             name,
+            in_water: m.fluids.in_water,
+            kind: m.kind.id.clone(),
         });
         events.push(MobEvent::Explode(
             [m.position.x, m.position.y, m.position.z],
             radius,
             m.species(),
+            m.silent,
         ));
+        // Creeper.spawnLingeringCloud: the effects it has make a cloud where it stood, after the
+        // blast. A hidden effect (`hideParticles`) takes no part in the cloud's colour.
+        if !m.extra.effects.is_empty() {
+            // The ids a potion's effects carry: vanilla ones without the namespace.
+            let effects: Vec<_> = m
+                .extra
+                .effects
+                .iter()
+                .map(|e| {
+                    (
+                        e.id.strip_prefix("minecraft:").unwrap_or(e.id),
+                        e.duration,
+                        e.amplifier,
+                    )
+                })
+                .collect();
+            let color = horizon_client_core::potions::effects_color(
+                effects
+                    .iter()
+                    .filter(|(id, ..)| !m.extra.hidden_effects.contains(id))
+                    .map(|(id, _, amp)| (*id, *amp)),
+            );
+            let hidden = effects
+                .iter()
+                .filter(|(id, ..)| {
+                    m.extra
+                        .hidden_effects
+                        .iter()
+                        .any(|h| h.strip_prefix("minecraft:").unwrap_or(h) == *id)
+                })
+                .map(|(id, ..)| *id)
+                .collect();
+            let ambient = effects
+                .iter()
+                .filter(|(id, ..)| {
+                    m.extra
+                        .ambient_effects
+                        .iter()
+                        .any(|h| h.strip_prefix("minecraft:").unwrap_or(h) == *id)
+                })
+                .map(|(id, ..)| *id)
+                .collect();
+            events.push(MobEvent::LingeringCloud {
+                at: [m.position.x, m.position.y, m.position.z],
+                effects,
+                hidden,
+                ambient,
+                color,
+            });
+        }
         m.removed = true;
+    }
+}
+
+/// Endermite.aiStep: `counter` is the life; an endermite not required to
+/// persist is discarded at 2400.
+pub(super) fn endermite_lifetime(m: &mut Mob) {
+    if !m.persistent {
+        m.extra.counter += 1;
+    }
+    if m.extra.counter >= 2400 {
+        m.removed = true;
+    }
+}
+
+#[cfg(test)]
+mod spider_vehicle_tests {
+    use super::*;
+    use crate::mobs::world::{test_player, with_test_world};
+    use horizon_core::geometry::Vec3;
+    use std::sync::Arc;
+
+    /// `SpiderAttackGoal.canUse` is `super.canUse() && !isVehicle()`: a spider
+    /// with a player (or a mob) on its back does not start the attack goal.
+    #[test]
+    #[ignore = "daily"]
+    fn a_spider_carrying_a_player_does_not_start_its_attack() {
+        let mut outcomes = None;
+        if !with_test_world(&[], |w, types| {
+            let kind = Arc::new(types.types["minecraft:spider"].clone());
+            let mut truth = Vec::new();
+            for rider in [false, true] {
+                let mut world = w.clone();
+                world.player = Some(test_player(Vec3::new(0.5, 64.0, 0.5)));
+                let mut m = Mob::new(1, kind.clone(), Vec3::new(0.5, 64.0, 0.5), 0.0);
+                m.ai.target = Some(Who::Player);
+                if rider {
+                    m.rider = Some(super::super::equine::Rider::default());
+                }
+                m.ai.goals.add(4, SpiderAttack(MeleeAttack::new(1.0, true)));
+                let mut lr = crate::health::TestLevel::new(0);
+                let mut events = Vec::new();
+                let mut cx = Cx {
+                    w: &world,
+                    level: &mut lr.level(),
+                    events: &mut events,
+                };
+                let mut goals = std::mem::take(&mut m.ai.goals);
+                goals.tick(&mut m, &mut cx);
+                truth.push(goals.is_running("SpiderAttack"));
+                m.ai.goals = goals;
+            }
+            outcomes = Some(truth);
+        }) {
+            return;
+        }
+        assert_eq!(
+            outcomes,
+            Some(vec![true, false]),
+            "a free spider attacks; a spider carrying a player is a vehicle and does not"
+        );
     }
 }

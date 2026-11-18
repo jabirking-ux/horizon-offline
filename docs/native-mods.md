@@ -1,172 +1,166 @@
-# Native mods (experimental)
+# Native mods
 
-Native mods are **mixin bundles** that change the game's own Rust source before it is compiled, with
-[horizon-mixins](https://github.com/horizon-rust/horizon-mixins) (MIT, by levzzz5154, made for Horizon). A bundle
-is a `horizon-mixin.toml` and a few `.rs` helpers that hook into named functions of the game (HEAD, BEFORE_CALL,
-RETURN, MODIFY_ARG, OVERWRITE...; the tool's README lists them). A port such as Veinminer is three HEAD hooks and
-one module. Start a mod from [horizon-native-mod-template](https://github.com/horizon-rust/horizon-native-mod-template).
+Native mod docs live in the modding book: [native mods](modding/src/how-to/native-mods.md), [trait mods, Parts and attachments](modding/src/concepts/parts.md), [injections](modding/src/concepts/injections.md) and the [hook notes](https://github.com/horizon-rust/horizon/tree/main/crates/horizon-mod-vocab/src/hooks).
 
-Native mods are native code with the player's rights, not sandboxed. The launcher turns them on only when the player
-installs one (after a notice) and builds them only behind a red warning; the registry lists one only after a review; and
-they play in a game of their own, built for the instance they are installed in.
+## Living death version 2
 
-## Pinned to a Nightly
+`Hooks::living_death` receives a mutable `LivingDeathEvent` on the server only.
+Its fields are `entity`, `kind`, `source: &HurtSource`,
+`weapon: Option<&ItemStack>` and `cancel`. This is a clean contract break:
+the old top-level `damage_type` and `attacker` fields and callback signature
+are removed, with no compatibility callback.
 
-A native mod builds on one exact Horizon commit: `[compatibility] horizon_revision` in its `horizon-mixin.toml`,
-and `horizon` in the `horizon-native.json` of its registry file (`.hnmod`, `horizon_mods::index::native`). Mods
-pin a **Nightly's commit** (or a release's). Every Nightly ships its source and keeps its commit for good as the
-tag `nightly-source/<date>-<short>` ([release-flow.md](release-flow.md#nightly-channel)), so a pinned mod still
-builds after its Nightly is replaced. All the mods of one build must pin the same commit; when they don't, the
-launcher says which mod pins which, and the player installs versions made for the same Nightly. A bundle with no
-pin builds on the commit of the installed version the build starts from.
+The source is the accepted killing blow seen by `living_incoming_damage`:
+damage type, real causing entity ID (including players), direct entity ID
+(including arrows), and original optional source position. The optional weapon
+is that blow's complete stack, including damage and component overrides, not
+a later read of the attacker's hand.
+`/damage` keeps the selected registered trident type rather than relabeling it
+as thrown damage. Its explicit `by` (direct) and `from` (causing) entities remain
+independent, including a locally bound causing player. A damage type alone does
+not manufacture an arrow-family direct entity.
 
-### Mods on the hook points
+Cancellation suppresses death loot, experience and death messages without
+writing health. A listener that sets health to 5 leaves the entity alive at 5;
+an unhealed body at health <= 0 is removed after 20 ticks without redispatch
+or loot. Cancellation alone does not heal or force health to 1.
+The cancelled continuation belongs to the living body: full-body teleports preserve
+its original removal deadline, rather than restarting it or retrying death.
+A later positive `set_health` revives a cancelled dying body, clears that deadline
+and permits a subsequent genuine death; transaction abort restores the prior
+health and continuation together. Saved mobs retain the optional Horizon-owned
+`horizon:death_canceled` bit alongside their real `DeathTime`; ordinary loading
+resumes a saved dying body without running its death callback or loot again.
 
-A mod that hooks only Horizon's native hook points (`crates/horizon-client/src/game/native_hooks.rs`: empty
-functions the game calls at fixed places, plus helpers, kept stable across releases) can name the version it
-needs instead of pinning: `"hooks": 1` in its `.hnmod`'s `horizon-native.json`, the `NATIVE_HOOKS_API` of that
-file when it was made. Hook points are only ever added: each addition raises `NATIVE_HOOKS_API`, and a mod builds
-on any Horizon whose version is the one it needs or a later one. Its `horizon` is then only the commit it was tested on. The launcher builds it on the commit the other mods
-pin, else on the installed version's commit (the game the player plays), after checking that commit's
-`NATIVE_HOOKS_API` (read from GitHub) is at least the mod's; when it isn't and nothing pins, it builds on the commit the
-mod was tested on. In its own copy of the mod it sets `horizon_revision` to the commit it builds on. Horizon's
-own native mods (Zoom, FPS counter, Keystrokes, Minimap; horizon-rust/horizon-mods, `native/<name>/`) are made this way, so any of them build together
-with no re-release for each Nightly. The `mods` feature (WebAssembly mods) is passed to the build only when the source has it.
+### Portable contract regression
 
-API 2 adds the item panel beside container screens and its recipe pages (`native_panel_items`,
-`native_panel_recipes`, and the hook `native_panel_event` for the player's clicks, searches and keys over items), and
-the game's items and recipes (`native_recipes`, `native_known_recipes`, `native_place_recipe`, `native_give`): what a
-recipe viewer needs, in builds with or without the `mods` feature. A WebAssembly mod's panel shows only while no native
-mod shows one.
+`crates/horizon-mod-wasm/tests/fixture/src/lending.rs` supplies the same
+`Lender::living_death` listener and `check_death` assertions to the native
+`collect_positions_copy_in_and_out_natively_as_in_the_real_guest` test and
+the compiled-guest `real_member` test. They dispatch a player/arrow source
+with distinct causing/direct IDs and a nonintegral position, and check the
+bow's identity, damage and complete custom-component patch, both optional
+weapon branches, cancellation, and an unchanged borrowed weapon. Their scope is
+the portable record boundary, not Game death timing or loot behavior.
 
-API 3 adds authoritative world lifecycle events through `native_world_lifecycle`: open ready, open failed,
-and final close. Bundles that use these events need `"hooks": 3`.
+Build the matching real guest and standard module, then run both selectors:
 
-API 4 adds authoritative server tick events through `native_server_tick`: start and end of each non-paused
-server tick, with `world_running`. A frozen world reports false except during a requested step. Bundles that
-use these events need `"hooks": 4`.
+```sh
+cargo build -p cargo-horizon-mod
+# From crates/horizon-mod-wasm/tests/fixture, with ROOT set to the repository:
+"$ROOT/target/debug/cargo-horizon-mod" horizon-mod build --wasm --catalog points.json
+"$ROOT/target/debug/cargo-horizon-mod" horizon-mod wasm-std "$ROOT/target/horizon-wasm-std.wasm" --catalog points.json
+# From the repository root:
+cargo test -p horizon-mod-wasm --features listener-fixture --test native_listener collect_positions_copy_in_and_out_natively_as_in_the_real_guest -- --exact
+HORIZON_WASM_FIXTURE="$PWD/crates/horizon-mod-wasm/tests/fixture/target/horizon-mod/wasm_fixture.hmod" HORIZON_WASM_STD="$PWD/target/horizon-wasm-std.wasm" cargo test -p horizon-mod-wasm --features listener-fixture --test real_member real_member -- --ignored --exact
+```
 
-## What the launcher does
+### Victim ownership and hot path
 
-In the window: install a native mod from the Mods page. The first one shows a notice once (the first build downloads
-Rust and can take 20 to 30 minutes; later builds are faster) and turns on Settings → Game → **Native mods
-(experimental)**, which stays off for players who never install one; `mods install` does the same. Then **Build**. The launcher names the mods, warns in red, and builds only from "I trust these mods: build"; the
-row shows each step, the error if one fails, and the build the instance plays. From the command line:
-`horizon-launcher native-build [FOLDER] [--instance NAME] --trust-native-code`. FOLDER is a bundle, an unpacked
-`.hnmod`, or a folder of them; without it, the native mods turned on in the instance. It is not an MCP tool:
-trusting native code is the player's decision, never an agent's.
+One immutable accepted-hit record follows the mob or player body; there is no
+separate death-weapon table. Mob reconstruction moves it through the existing
+non-Clone vehicle transfer token, along with the processed death attempt; the
+real `DeathTime` NBT codec preserves the original removal deadline. A full player
+teleport restore moves the record through the existing body-replacement boundary,
+and respawn discards it.
+Each body stores an optional shared pointer; snapshots share the immutable
+record rather than copying its source name and stack. Records are captured only
+for listened fatal deaths/loot or accepted projectiles needed by `loot_drops`.
+Without those listeners, no accepted record or saved weapon is allocated.
+Armor's existing deferred event carries the actual cause, direct entity and
+position as scalars; synchronous equipment wear borrows the paused hit's name.
+The attack scope retains a projectile's weapon only when incoming damage,
+death or loot listeners need it. No idle-tick sweep or second source map is added.
 
-1. **Rust.** The launcher's own toolchain ([`rust_toolchain`](../launcher/src/rust_toolchain.rs)): Rust 1.99.1's
-   official `rustc`, `cargo` and `rust-std` (and `rust-mingw` on Windows), each pinned by SHA-256, downloaded once
-   from static.rust-lang.org into `<launcher data>/rust/`, with its own Cargo home `<launcher data>/cargo/`. No
-   rustup, nothing on the system; the player's own Rust is never used. Windows uses the `windows-gnu` host, which
-   links without Visual Studio. `rust-mingw` only links, so on Windows the toolchain also brings MinGW-w64
-   (`rust_toolchain::MINGW`: WinLibs' GCC 16.2.0 on MinGW-w64 14.0.0, MSVCRT like `rust-mingw`, one zip pinned by
-   SHA-256, its `mingw64/` without the documentation) on the build's `PATH`: `ring`, `hidapi` and wasmtime compile C,
-   and `windows-sys`' `raw-dylib` imports need `dlltool` and the assembler it runs. The linker is the system's on
-   macOS (the Command Line Tools: the launcher asks for `xcode-select --install`) and Linux (`cc`).
-   `horizon-launcher rust status|install|remove`.
-2. **horizon-mixins**, at the commit the mods name (their `.hnmod`'s `mixins`), else `native_mods::MIXINS_REV`,
-   built once with that cargo (`cargo install --locked --git … --rev …`) into `native/tools/<commit>/`.
-3. **The source** of the pinned commit: GitHub's archive of it, once per commit (`native/source/<commit>/`, about
-   63 MB unpacked), with the commit in `.horizon-revision`. Never the player's own checkout. Links in the
-   archive are left out: the tool refuses them and nothing needs them to build.
-4. **Mixins.** The bundles are copied first, so the build and its key use that copy whatever happens to the
-   folder meanwhile. `horizon-mixins apply` stages the modded source; the launcher copies only the files that
-   changed into `native/stage/`, so Cargo, which goes by file times, recompiles only the crates the mods touch.
-5. **Compile**: `cargo build --locked --profile release --features horizon-client/mods -p horizon-client`, the
-   release's own command (game-build.yml), into `native/target/`. Cargo downloads the locked crates from
-   crates.io (Horizon has no git dependencies). The log is `native/build.log`; a failure shows its last lines (a
-   horizon-mixins diagnostic in one line).
-6. **Install**: a new version, `native-<commit>-<key>`, a copy of the starting version's folder (resources
-   included, cloned on APFS, Btrfs and ReFS) with the built game in place of its own, and a `native-mods.json`
-   saying which commit, mods, horizon-mixins and Rust made it. The instance the mods are installed in plays it (a
-   folder built from the command line, or mods of the default home, go to the **Native mods** instance). That
-   instance gets each mod's settings from the default home the first time it plays it (its
-   `horizon-mods/.horizon-mod-data/<id>/` folder and `key.<id>.` lines of `horizon-mods.txt`, where the mod's
-   WebAssembly version kept them); nothing it already has is overwritten.
+Prepared-resource Game regressions live in
+`game::native_hooks::death_source_tests`; the player cases additionally require
+loopback sockets. `game::lan_actions::guest_body::tests::accepted_hit_moves_through_teleport_restore_but_not_respawn`
+covers the ownership transfer. These are source regressions, not a record of a
+completed run.
 
-## Cache and disk
+The clean-room contract references are the public
+[NeoForge 26.3 LivingDeathEvent Javadoc](https://aldak0.ru/javadoc/26.3.x/net/neoforged/neoforge/event/entity/living/LivingDeathEvent.html)
+and [ArmorHurtEvent Javadoc](https://aldak0.ru/javadoc/26.3.x/net/neoforged/neoforge/event/entity/living/ArmorHurtEvent.html),
+plus the pinned game's `LivingEntity.die`, `LivingEntity.tickDeath` and
+`DamageSources` factories. NeoForge's LGPL source and patches were not read.
 
-The key hashes the commit, the horizon-mixins commit, Rust's version, the profile and features, and every file of
-every bundle. The same set on the same commit is never built twice. A change gives a new build, and
-`native/target/` stays, so a rebuild compiles only `horizon-client` and what the mods touched.
+## Prebuilt SDK layout
 
-Measured 2026-10-28 on the Mac mini (M4 Pro, 14 cores) with Veinminer 0.3.0 on Nightly `83f15fa`,
-`CARGO_BUILD_JOBS=8` while other agents' builds ran (upper bounds):
+The v4 prebuilt archive separates target artifacts (`deps/`) from host proc-macro
+libraries (`host/`). Cargo builds with an explicit `--target <rustc host triple>`,
+so host build dependencies cannot introduce a second metadata variant into the
+target SDK. Only host proc-macro dynamic libraries are shipped, not their host
+dependency metadata. Consumers pass both folders as `-L dependency` paths; named
+extern and facade lookups use only `deps/`. `native/` still holds native linker
+inputs. The identity manifest hashes files in all three folders.
 
-| What | Size, time |
-|---|---|
-| Rust 1.99.1 (`<launcher data>/rust/`) | 453 MB; 58 s to download and unpack |
-| horizon-mixins (`native/tools/`) | 7 MB; built once in 19 s |
-| Crates in the launcher's Cargo home (`<launcher data>/cargo/`) | 289 MB |
-| Source of one commit, and the stage | 64 MB each |
-| First build: release profile, the whole game | 9 min 10 s of compiling, 9 min 41 s in all; `native/target/` 1.5 GB |
-| Rebuild after a helper's code changed | 2 min 46 s of compiling (only `horizon-client`), 2 min 53 s in all |
-| A change horizon-mixins ignores (a comment) | nothing compiled; 31 s, mostly the version folder's copy |
+Target compilation retains `-C prefer-dynamic` (and `-C rpath` on macOS), while
+Cargo's explicit target keeps those flags off host proc-macros. Multiple versions
+of a target dependency are legitimate: uniqueness is required only when selecting
+a named extern or publishing an internals facade, never across the whole SDK.
 
-Measured 2026-10-29 on Windows 11 (Ryzen 7 9800X3D, 16 threads), the same mod and Nightly, an empty `native/target/`
-(horizon-mixins, the source and the crates were already downloaded):
+To rebuild and prove the archive with the launcher's pinned Rust toolchain active:
 
-| What | Size, time |
-|---|---|
-| Rust 1.99.1 and MinGW-w64 (`<launcher data>/rust/`) | 1.7 GB, MinGW-w64 875 MB of it |
-| Crates in the launcher's Cargo home | 657 MB |
-| First build: release profile, the whole game | 6 min 57 s of compiling, 8 min 3 s in all; `native/target/` 2.0 GB |
+```sh
+python3 tools/prebuilt_game.py build prebuilt
+python3 tools/prebuilt_game.py smoke prebuilt
+python3 tools/prebuilt_game.py exports prebuilt
+python3 tools/native_dylib_probe.py --sdk prebuilt --output target/native-dylib-probe
+```
 
-Measured 2026-10-28 on Linux (an x86_64 server with no Rust of its own), Zoom on Horizon `1149c92`, 3 jobs while CI
-ran: `rust install` in 11 s (592 MB), the first build in 12 min 9 s. The built game ran Zoom's proof (under `xvfb-run`:
-the game needs a display even with `--offscreen`).
+For a server archive, add `--server` to the build command. Use a fresh
+`CARGO_TARGET_DIR` when collecting a clean-build proof; all commands must use the
+same compiler as `launcher/src/rust_toolchain.rs`.
 
-Only the native builds an instance plays are kept (`native_mods::prune`); `native/target/` stays for the next one.
+## Upstream service contracts carried by this sync
 
-## Trust
+The upstream additions below describe behavior to preserve in the typed `Host` and
+handle API, not additional `native_*` entry points or a bundle API counter. Use the
+book and generated API reference for the available signatures; pending hook fragments
+must be converted to the hook catalog before being advertised as available.
 
-- **Off until the player installs one.** Settings → Game → Native mods stays off for a player who never installs a
-  native mod; the first install shows the notice and turns it on. The command needs `--trust-native-code`; the window
-  shows a warning in red before every build: the mods run with full access to the computer, and their ids and
-  versions. The Mods page says who made each one, and "Not made or endorsed by the Horizon project" for any mod not
-  Horizon's own.
-- **The registry** (horizon-rust/horizon-mods) lists them as their own kind, `native-mod`, only after a maintainer
-  has read the source: the `.hnmod` contains `.rs` and `.toml` files and may contain data files under
-  `mixins/<id>/data/`. The launcher checks the bundle without running anything. Native code is trusted.
-  The file is pinned by SHA-256 like every registry file. An update is reviewed again; `revoked.toml` takes one down.
-  A WebAssembly mod's entry may turn `native-mod` once (never back): its `.hmod` versions stay published and
-  are checked as `.hmod`s, the index lists only its `.hnmod` versions, and the launcher's update keeps the
-  player's `.hmod` (the game runs it until a native build has the mod, then skips it); removing the mod removes both.
-- **Isolation of data.** Native mods run only in the instance built for them, with its own worlds, options and logs.
-- What this does not do: sandbox the compiled game. horizon-mixins' checks stop mistakes, not a malicious helper
-  ([security notes](https://github.com/horizon-rust/horizon-mixins/blob/main/docs/security.md)).
+- Tamed-mob death messages are offered after construction and only when an online
+  owner would receive them with `show_death_messages` enabled. Listeners may replace
+  or suppress the message in dispatch order. The server-only named-mob log is not
+  a second player-message hook.
+- Dedicated-server settings describe the live listener: account authentication,
+  bound port and whether Velocity forwarding is active. They never expose the
+  forwarding secret, and are unavailable before listening or on integrated/LAN
+  servers. Secure-profile enforcement and hardcore are not part of this read.
+- Vehicle and passenger reads use entity handles (`entity_vehicle` and
+  `entity_passengers` on `Host`), not parallel numeric-ID helpers. Passenger order
+  follows vanilla, with the controlling passenger first. These are read-only.
+- UUID lookup from a read-only context must not swap levels. A mutable lookup can
+  reach other loaded levels; entity NBT reads there must refuse unloaded levels,
+  missing entities and client-side use rather than load a level implicitly.
+- Map reads return the 128 × 128 row-major color bytes and scale, dimension and
+  locked metadata. Reading saved data must not install a loaded map as a side
+  effect; unknown maps and client-side world reads return no value.
+- Living-entity sight uses eye-to-eye COLLIDER shapes, no fluids, the source's
+  collision context and vanilla's 128-block limit. Unknown entities, different
+  levels and unavailable server levels must not report visibility. The typed
+  `living_has_line_of_sight` and `level_line_of_sight` reads replace raw-ID helper
+  proposals; the point-to-point form has no entity collision context.
+- Camera submersion (main's `native_camera_submersion(camera, fog_type)`, API 646): a client
+  listener runs when the camera's fluid submersion type is evaluated
+  (`Camera.getFluidInCamera`), before fog and underwater screen overlays are prepared.
+  Setting `fog_type` to `FogType::Atmospheric` clears underwater, lava and powder-snow fog
+  and overlays (Freecam uses it). Hook entry: `camera_submersion` v1, client, `listen`.
+- Client entity update (main's `native_client_entity_update(viewer, id, nbt) -> bool`,
+  `host.client_entity_update`): like `native_client_entity_set` for a few fields. It reads
+  `nbt` as `set` does but sends only the data of the keys `nbt` has (`transformation` sends
+  its four parts); a key at its default value is sent, so a field can go back to it. A
+  display's `start_interpolation` goes with it, so a changed transformation eases over
+  `interpolation_duration`. `set` still sends every field. False when `id` isn't this
+  viewer's client-side entity, when the viewer isn't on, and outside a player's hook.
 
-## Multiplayer
+These are contract notes, not runtime verification of the converted services.
 
-- **Single player and LAN host:** the mods run in the host's game and its integrated server, so a server-side
-  hook applies to every player of the world.
-- **Joining a server:** only client-side hooks do anything; the protocol is unchanged.
-- **Dedicated servers:** native mods are not built yet. Lifecycle hook call sites are ready for when the pipeline builds them (`--no-default-features`).
+## Living absorption
 
-## Left to do
-
-- Rebuild after the mods or the Nightly change (asking first, as it compiles for minutes).
-- A prebuilt horizon-mixins from its CI instead of building it on the player's computer.
-
-## Named hook catalog (draft)
-
-`native-hooks.json` maps stable hook names and contract versions to the current
-source targets. A contract includes the signature, call timing and behavior.
-Keep an existing contract or add a new version when it changes incompatibly.
-The catalog does not cover helper methods or arbitrary private game code.
-Named injection resolution needs a matching horizon-mixins change; existing raw
-targets and the `hooks` metadata continue to work as before.
-
-### Reading server blocks (draft)
-
-A native server tick hook can call `native_server_block` with its context, a dimension id and a block position. It returns the block name and state properties from a loaded chunk. It does not load a chunk or open a dimension. Reads outside that hook, from a stale context, from unavailable dimensions or outside the world bounds return an error.
-
-### Neighbour observations (draft)
-
-`native_neighbor_changed` observes each authoritative server `neighborChanged` before the block handles it. It supplies the dimension, position, current state ID, changed block ID and moved flag. Resolve IDs with the level's registries during the hook; the hook does not load chunks or change the update queue.
-
-### Server block changes (draft)
-
-`native_block_changed` observes a committed authoritative server `Level.setBlock` change before block side effects and neighbour updates. It supplies the dimension, position and old and new state IDs. It does not observe chunk loading or direct storage writes that bypass `Level.setBlock`.
+Living handles expose `absorption(host)` on both sides and
+`set_absorption(host, amount)` on the server. Resolution follows health: armor
+stands, dragons and stale handles return `None` on reads. A non-finite write
+returns `false` and changes nothing; accepted amounts clamp to
+`0..=max_absorption` for that entity. Player and mob writes roll back with the
+transaction. This is the absorption amount, not the absorption status effect.

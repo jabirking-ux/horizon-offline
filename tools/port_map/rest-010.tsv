@@ -1,13 +1,16 @@
-SnbtGrammar.cleanAndAppend	inline	crates/horizon-command/src/snbt.rs::grammar	float text: underscores dropped in the float action
-SnbtGrammar.parseUnsignedShort	inline	crates/horizon-command/src/snbt.rs::IntLit::create	unsigned short arm: value must fit 16 bits
-SnbtGrammar.createFloat	port	crates/horizon-command/src/snbt.rs::float_tag	gap: minor: the text is built in the grammar's float action; float_tag types it
-SnbtGrammar.convertFloat	inline	crates/horizon-command/src/snbt.rs::float_tag	float arm; non-finite values rejected
-SnbtGrammar.convertDouble	inline	crates/horizon-command/src/snbt.rs::float_tag	double arm; non-finite values rejected
+SnbtGrammar.cleanAndAppend	inline	crates/horizon-core/src/nbt_snbt.rs::Parser::float	float text: underscores dropped before numeric conversion
+SnbtGrammar.parseUnsignedShort	inline	crates/horizon-core/src/nbt_snbt.rs::Parser::integer	unsigned short arm validates the sixteen-bit magnitude
+SnbtGrammar.createFloat	port	crates/horizon-core/src/nbt_snbt.rs::Parser::float	constructs typed float or double values from the parsed decimal representation
+SnbtGrammar.convertFloat	inline	crates/horizon-core/src/nbt_snbt.rs::Parser::float	float arm; non-finite values rejected
+SnbtGrammar.convertDouble	inline	crates/horizon-core/src/nbt_snbt.rs::Parser::float	double arm; non-finite values rejected
 SnbtGrammar.joinList	skip:java		joins parser parts as a string
-SnbtGrammar.ArrayPrefix.isAllowed	inline	crates/horizon-command/src/snbt.rs::array	allowed element suffixes per array kind
-SnbtGrammar.ArrayPrefix.buildNumber	inline	crates/horizon-command/src/snbt.rs::array	element type check, then the value
-SnbtGrammar.ArrayPrefix.computeType	inline	crates/horizon-command/src/snbt.rs::array	default type when the element has no suffix
-SnbtGrammar.IntegerLiteral.cleanupDigits	port	crates/horizon-command/src/snbt.rs::IntLit::cleaned	sign and underscores
+SnbtGrammar.ArrayPrefix.isAllowed	inline	crates/horizon-core/src/nbt_snbt.rs::Parser::integer	typed-array kind bounds the explicit element suffix
+SnbtGrammar.ArrayPrefix.buildNumber	inline	crates/horizon-core/src/nbt_snbt.rs::Parser::list	constructs typed array elements from validated integer values
+SnbtGrammar.ArrayPrefix.computeType	inline	crates/horizon-core/src/nbt_snbt.rs::Parser::integer	typed-array kind supplies the absent integer suffix
+SnbtGrammar.IntegerLiteral.cleanupDigits	port	crates/horizon-core/src/nbt_snbt.rs::Parser::integer	removes numeric underscores after parsing sign and radix
+SnbtGrammar.IntegerLiteral.create	port	crates/horizon-core/src/nbt_snbt.rs::Parser::integer	validates signed or unsigned bit widths and constructs the typed integer
+SnbtGrammar.IntegerLiteral.signedOrDefault	inline	crates/horizon-core/src/nbt_snbt.rs::Parser::integer	explicit signedness wins; decimal defaults to signed
+SnbtGrammar.createParser	port	crates/horizon-core/src/nbt_snbt.rs::Parser::new	constructs the shared recursive SNBT parser state instead of a packrat grammar graph
 SnbtPrinterTagVisitor.visitByteArray	skip:data		datagen .snbt writer only (NbtUtils.structureToSnbt); Horizon writes no .snbt
 SnbtPrinterTagVisitor.visitIntArray	skip:data		datagen .snbt writer only (NbtUtils.structureToSnbt); Horizon writes no .snbt
 SnbtPrinterTagVisitor.visitLongArray	skip:data		datagen .snbt writer only (NbtUtils.structureToSnbt); Horizon writes no .snbt
@@ -19,7 +22,7 @@ StringTagVisitor.visitIntArray	inline	crates/horizon-client-core/src/snbt.rs::vi
 StringTagVisitor.visitLongArray	inline	crates/horizon-client-core/src/snbt.rs::visit	compact [L;..L] form
 StringTagVisitor.visitList	inline	crates/horizon-client-core/src/snbt.rs::visit	compact list form
 StringTagVisitor.visitCompound	inline	crates/horizon-client-core/src/snbt.rs::visit	compact form; keys sorted
-StringTagVisitor.handleKeyEscape	port	crates/horizon-client-core/src/snbt.rs::unquoted_key	decides bare or quoted key; quote_and_escape does the quoting
+StringTagVisitor.handleKeyEscape	inline	crates/horizon-client-core/src/snbt.rs::Pretty::compound	decides bare or quoted key; quote_and_escape does the quoting
 Tag.acceptAsRoot	skip:java		streaming visitor entry point; Horizon reads whole trees
 Tag.asBoolean	port	crates/horizon-world/src/datafix/dynamic.rs::as_bool_opt	non-zero number is true
 TagParser.castToCompoundOrThrow	inline	crates/horizon-command/src/snbt.rs::parse_compound_argument	expected-compound error
@@ -27,7 +30,7 @@ TagParser.parseCompoundFully	port	crates/horizon-command/src/snbt.rs::parse_full
 TagType.parseRoot	skip:java		streaming root parse; Horizon reads whole trees
 TagType.StaticSize.skip	skip:java		streaming skip; Horizon reads whole trees
 TagType.VariableSize.skip	skip:java		streaming skip; Horizon reads whole trees
-TagTypes.getType	inline	crates/horizon-world/src/nbt.rs::Reader::payload	tag id dispatch; unknown id is an error
+TagTypes.getType	inline	crates/horizon-core/src/nbt.rs::Reader::payload	tag id dispatch; unknown id is an error
 TextComponentTagVisitor.visitByte	inline	crates/horizon-client-core/src/snbt.rs::Pretty::visit	number arm: gold value, red suffix
 TextComponentTagVisitor.visitShort	inline	crates/horizon-client-core/src/snbt.rs::Pretty::visit	number arm: gold value, red suffix
 TextComponentTagVisitor.visitLong	inline	crates/horizon-client-core/src/snbt.rs::Pretty::visit	number arm: gold value, red suffix
@@ -90,8 +93,8 @@ FriendlyByteBuf.writeWithCodec	skip:java		DataFixer codec plumbing; Horizon has 
 FriendlyByteBuf.readLenientJsonWithCodec	skip:java		codec plumbing for lenient JSON
 FriendlyByteBuf.writeJsonWithCodec	skip:java		codec plumbing for JSON
 FriendlyByteBuf.readWithCount	skip:java		count loop; the List codec does it
-FriendlyByteBuf.writeEnumSet	port	crates/horizon-protocol/src/packets/play.rs::PlayerInfoUpdate::write	action flags as one byte (8 actions fit)
-FriendlyByteBuf.readEnumSet	port	crates/horizon-protocol/src/packets/play.rs::PlayerInfoUpdate::read	action flags as one byte (8 actions fit)
+FriendlyByteBuf.writeEnumSet	port	crates/horizon-protocol/src/packets/play/player_info.rs::PlayerInfoUpdate::write	action flags as one byte (8 actions fit)
+FriendlyByteBuf.readEnumSet	port	crates/horizon-protocol/src/packets/play/player_info.rs::PlayerInfoUpdate::read	action flags as one byte (8 actions fit)
 FriendlyByteBuf.writeOptional	port	crates/horizon-protocol/src/buf.rs::Opt::write	boolean flag, then the value
 FriendlyByteBuf.writeEither	port	crates/horizon-protocol/src/packets/play.rs::TrackedWaypoint::write	gap: minor: only the waypoint identifier; no generic Either codec
 FriendlyByteBuf.readEither	port	crates/horizon-protocol/src/packets/play.rs::TrackedWaypoint::read	gap: minor: only the waypoint identifier; no generic Either codec
@@ -108,10 +111,10 @@ FriendlyByteBuf.readFixedSizeLongArray	port	crates/horizon-protocol/src/buf.rs::
 FriendlyByteBuf.writeBlockPos	port	crates/horizon-protocol/src/buf.rs::Pos::write	packed x, z, y in one long
 FriendlyByteBuf.writeChunkPos	port	crates/horizon-protocol/src/buf.rs::ChunkPos::write	packed x and z in one long
 FriendlyByteBuf.readGlobalPos	port	crates/horizon-protocol/src/buf.rs::Pos::read	gap: minor: reads only the block position; the dimension is read by the GlobalPos packet! struct in play.rs
-FriendlyByteBuf.readVector3f	missing		player: item, block and text displays get no server-set scale or translation; Horizon reads no display transforms (no Vector3f codec)
-FriendlyByteBuf.writeVector3f	missing		player: item, block and text displays get no server-set scale or translation; Horizon reads no display transforms (no Vector3f codec)
-FriendlyByteBuf.readQuaternion	missing		player: display entities get no server-set rotation; Horizon has no Quaternion codec
-FriendlyByteBuf.writeQuaternion	missing		player: display entities get no server-set rotation; Horizon has no Quaternion codec
+FriendlyByteBuf.readVector3f	inline	crates/horizon-protocol/src/entity_data.rs::read_value	the VECTOR3 arm reads three big-endian floats; text_display.rs::TextDisplayData::apply takes ids 11 and 12 (translation, scale) from it
+FriendlyByteBuf.writeVector3f	inline	crates/horizon-protocol/src/entity_data.rs::write_value	the `Value::Floats` arm writes each float; the display data's ids 11 and 12 (translation, scale) go back out that way
+FriendlyByteBuf.readQuaternion	inline	crates/horizon-protocol/src/entity_data.rs::read_value	the QUATERNION arm reads four floats; text_display.rs::TextDisplayData::apply takes ids 13 and 14 (left and right rotation) from it
+FriendlyByteBuf.writeQuaternion	inline	crates/horizon-protocol/src/entity_data.rs::write_value	four floats through the `Value::Floats` arm; ids 13 and 14 (left and right rotation) go back out that way
 FriendlyByteBuf.writeUUID	port	crates/horizon-protocol/src/buf.rs::Writer::uuid	two longs
 FriendlyByteBuf.readUUID	port	crates/horizon-protocol/src/buf.rs::Reader::uuid	two longs
 FriendlyByteBuf.writeNbt	port	crates/horizon-protocol/src/buf.rs::Writer::nbt	null is written as End
@@ -131,9 +134,9 @@ FriendlyByteBuf.forEachByteDesc	skip:java		Netty buffer search
 FriendlyByteBuf.toString	skip:java		Netty buffer text
 FriendlyByteBuf.retain	skip:java		Netty reference counting
 FriendlyByteBuf.touch	skip:java		Netty leak detection
-HashedPatchMap.create	port	crates/horizon-protocol/src/item.rs::Hashed::of	gap: player: component hashes are never sent (added stays empty), so a vanilla server resyncs a slot that holds components
+HashedPatchMap.create	port	crates/horizon-protocol/src/item.rs::Hashed::of	component hashes are sent for every component the client keeps (item/hash/); gap: minor: a container or bundle_contents predicate whose nested exact components hold a byte no Codec.BOOL field names is left unhashed
 HashedPatchMap.matches	port	crates/horizon-client/src/lan/containers.rs::Hub::hashed_matches	gap: minor: compares item id and count only, not the component patch
-HashedStack.create	port	crates/horizon-protocol/src/item.rs::Hashed::of	gap: player: component hashes are never sent, so a vanilla server resyncs a slot that holds components
+HashedStack.create	port	crates/horizon-protocol/src/item.rs::Hashed::of	component hashes are sent for every component the client keeps (item/hash/); gap: minor: a container or bundle_contents predicate whose nested exact components hold a byte no Codec.BOOL field names is left unhashed
 HashedStack.ActualItem.matches	port	crates/horizon-client/src/lan/containers.rs::Hub::hashed_matches	gap: minor: compares item id and count only, not the component patch
 HiddenByteBuf.pack	skip:java		Netty in-memory channel wrapper
 HiddenByteBuf.unpack	skip:java		Netty in-memory channel wrapper
@@ -145,6 +148,6 @@ PacketBundleUnpacker.encode	port	crates/horizon-client/src/lan/entity.rs::Server
 PacketDecoder.decode	port	crates/horizon-protocol/src/packets/mod.rs::decode	rejects leftover bytes (larger than expected)
 PacketEncoder.encode	port	crates/horizon-protocol/src/packets/mod.rs::encode	gap: minor: no error log and no skippable-packet path
 PacketListener.fillCrashReport	skip:debug		crash report category
-PacketProcessor.scheduleIfPossible	port	crates/horizon-client/src/lan/conn.rs::read_loop	gap: minor: no shutdown rejection here; the hand-off is Hub::poll
+PacketProcessor.scheduleIfPossible	port	crates/horizon-client/src/lan/io_pool.rs::Pool::push	gap: minor: no shutdown rejection here; the hand-off is Hub::poll
 PacketProcessor.processQueuedPackets	port	crates/horizon-client/src/lan/hub.rs::Hub::process_inbox	per guest; at most 400 packets per tick, the rest wait
 PacketProcessor.ListenerAndPacket.handle	inline	crates/horizon-client/src/lan/hub.rs::Hub::process_inbox	gap: minor: no per-packet error catch; a failing handler does not become a disconnect

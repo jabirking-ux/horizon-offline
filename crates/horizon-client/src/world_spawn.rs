@@ -1,5 +1,8 @@
 //! Where a new world's spawn is and where a player first appears around it:
 //! MinecraftServer.setInitialSpawn's chunk spiral and PlayerSpawnFinder.
+use crate::save::number;
+use horizon_client_core::nbt_value::text;
+use horizon_core::nbt::Tag;
 use horizon_world::heightmap::HeightmapType;
 
 /// The block queries the spawn searches make on full (decorated, lit) chunks.
@@ -12,13 +15,24 @@ pub trait SpawnLevel {
     fn has_fluid(&self, x: i32, y: i32, z: i32) -> bool;
     /// `Block.isFaceFull(state.getCollisionShape(level, pos), Direction.UP)`.
     fn top_face_full(&self, x: i32, y: i32, z: i32) -> bool;
+    /// `DimensionType.hasCeiling()`: the search starts at the generator's
+    /// spawn height instead of each column's motion-blocking height.
+    fn has_ceiling(&self) -> bool;
+    /// `ChunkGenerator.getSpawnHeight(level)`.
+    fn spawn_height(&self) -> i32;
 }
 
-/// PlayerSpawnFinder.getLevelRespawnPos in a dimension without a ceiling:
-/// the block above the column's top full-topped collision, unless water,
-/// lava or only non-colliding blocks are on top.
+/// PlayerSpawnFinder.getLevelRespawnPos: the block above the column's top
+/// full-topped collision, unless water, lava or only non-colliding blocks
+/// are on top. A level with a ceiling (`caveWorld`) searches from the
+/// generator's spawn height, under the roof, not from the heightmap that
+/// sees the roof.
 pub fn level_respawn_pos(level: &impl SpawnLevel, x: i32, z: i32) -> Option<[i32; 3]> {
-    let top = level.height(HeightmapType::MotionBlocking, x, z);
+    let top = if level.has_ceiling() {
+        level.spawn_height()
+    } else {
+        level.height(HeightmapType::MotionBlocking, x, z)
+    };
     if top < level.min_y() {
         return None;
     }
@@ -157,6 +171,33 @@ impl PlayerSpawnFinder {
     }
 }
 
+impl crate::save::Level {
+    /// The world spawn's dimension (`level.dat` `spawn.dimension`); the
+    /// Overworld when the file names none (`LevelData.RespawnData.DEFAULT`).
+    pub fn spawn_dimension(&self) -> &str {
+        self.world_spawn_dimension
+            .as_deref()
+            .unwrap_or("minecraft:overworld")
+    }
+    /// The world spawn's block, rotation and dimension from `level.dat`'s
+    /// `spawn` (26.3: `{pos, dimension, yaw, pitch}`; older worlds:
+    /// `SpawnX`/`SpawnY`/`SpawnZ`, a bare Overworld column).
+    pub fn read_world_spawn(&mut self, data: &Tag) {
+        self.world_spawn = match data.get("spawn").and_then(|s| s.get("pos")) {
+            Some(Tag::IntArray(p)) if p.len() == 3 => Some([p[0], p[1], p[2]]),
+            _ => data.get("SpawnX").map(|_| {
+                ["SpawnX", "SpawnY", "SpawnZ"].map(|k| number(data.get(k)).unwrap_or(0) as i32)
+            }),
+        };
+        let angle = |k: &str| match data.get("spawn").and_then(|s| s.get(k)) {
+            Some(Tag::Float(b)) => f32::from_bits(*b),
+            _ => 0.0,
+        };
+        self.world_spawn_angle = [angle("yaw"), angle("pitch")];
+        self.world_spawn_dimension = data.get("spawn").and_then(|s| text(s.get("dimension")));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,6 +269,40 @@ mod tests {
         fn top_face_full(&self, _: i32, y: i32, _: i32) -> bool {
             y <= self.top
         }
+        fn has_ceiling(&self) -> bool {
+            false
+        }
+        fn spawn_height(&self) -> i32 {
+            64
+        }
+    }
+
+    /// A level with a roof: the heightmap sees the roof, the search should not.
+    struct Cave {
+        floor: i32,
+        roof: i32,
+        spawn_height: i32,
+        ceiling: bool,
+    }
+    impl SpawnLevel for Cave {
+        fn min_y(&self) -> i32 {
+            -64
+        }
+        fn height(&self, _: HeightmapType, _: i32, _: i32) -> i32 {
+            self.roof + 1
+        }
+        fn has_fluid(&self, _: i32, _: i32, _: i32) -> bool {
+            false
+        }
+        fn top_face_full(&self, _: i32, y: i32, _: i32) -> bool {
+            y == self.roof || y <= self.floor
+        }
+        fn has_ceiling(&self) -> bool {
+            self.ceiling
+        }
+        fn spawn_height(&self) -> i32 {
+            self.spawn_height
+        }
     }
 
     #[test]
@@ -265,5 +340,23 @@ mod tests {
             ),
             Some([-32, 71, 16])
         );
+    }
+
+    #[test]
+    fn a_ceiling_starts_the_respawn_search_at_the_generator_spawn_height() {
+        let cave = Cave {
+            floor: 50,
+            roof: 120,
+            spawn_height: 60,
+            ceiling: true,
+        };
+        // From under the roof the floor is 51; from the heightmap it would be
+        // the roof itself, 121.
+        assert_eq!(level_respawn_pos(&cave, 1, 2), Some([1, 51, 2]));
+        let open = Cave {
+            ceiling: false,
+            ..cave
+        };
+        assert_eq!(level_respawn_pos(&open, 1, 2), Some([1, 121, 2]));
     }
 }

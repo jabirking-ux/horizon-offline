@@ -36,7 +36,9 @@ pub fn main() -> Result<()> {
     let root = PathBuf::from(&args[0]);
     let dir = PathBuf::from(&args[1]);
     let assets = Assets::load(&root)?;
-    let render = assets.reload(&root)?;
+    let render = assets.reload(&horizon_assets::resource_source::ResourceRoot::directory(
+        root.to_path_buf(),
+    ))?;
     let mut scene = World::test_scene(&assets, &render, 1)?;
     fs::write(
         dir.join("scene.json"),
@@ -92,7 +94,7 @@ pub fn main() -> Result<()> {
                     if in_ground {
                         continue;
                     }
-                    if let Some((stop, _)) =
+                    if let Some((stop, _, _)) =
                         arrows::clip_block_stop(&scene, &facts, &binding, position, velocity)
                     {
                         // onHitBlock: pulled back, stopped, stuck, shaking 7 ticks.

@@ -19,15 +19,20 @@ pub enum Pose {
 }
 impl Pose {
     /// `Pose` by its network id (`Pose.id`); the poses a player never takes
-    /// are standing.
+    /// are standing. One id table: `mod_api::Pose`'s, narrowed to the avatar's
+    /// six stances.
     pub fn from_id(id: i32) -> Self {
-        match id {
-            1 => Self::FallFlying,
-            2 => Self::Sleeping,
-            3 => Self::Swimming,
-            4 => Self::SpinAttack,
-            5 => Self::Crouching,
-            _ => Self::Standing,
+        mod_api::Pose::from_id(id).into()
+    }
+    /// Network ID for this pose (`Pose.id`).
+    pub fn id(self) -> i32 {
+        match self {
+            Self::Standing => 0,
+            Self::FallFlying => 1,
+            Self::Sleeping => 2,
+            Self::Swimming => 3,
+            Self::SpinAttack => 4,
+            Self::Crouching => 5,
         }
     }
     pub fn name(self) -> &'static str {
@@ -58,13 +63,88 @@ impl Pose {
         }
     }
 }
+impl From<Pose> for mod_api::Pose {
+    /// The living entity's pose (`Entity.getPose`) the avatar's stance names.
+    fn from(pose: Pose) -> Self {
+        match pose {
+            Pose::Standing => Self::Standing,
+            Pose::FallFlying => Self::FallFlying,
+            Pose::Sleeping => Self::Sleeping,
+            Pose::Swimming => Self::Swimming,
+            Pose::SpinAttack => Self::SpinAttack,
+            Pose::Crouching => Self::Crouching,
+        }
+    }
+}
+impl From<mod_api::Pose> for Pose {
+    /// Narrow a living entity's pose to a movement stance. Dimension queries
+    /// use `Dimensions::avatar` to preserve Avatar.POSES's fixed dying box.
+    fn from(pose: mod_api::Pose) -> Self {
+        match pose {
+            mod_api::Pose::FallFlying => Self::FallFlying,
+            mod_api::Pose::Sleeping => Self::Sleeping,
+            mod_api::Pose::Swimming => Self::Swimming,
+            mod_api::Pose::SpinAttack => Self::SpinAttack,
+            mod_api::Pose::Crouching => Self::Crouching,
+            _ => Self::Standing,
+        }
+    }
+}
 #[derive(Clone, Copy, Debug)]
 pub struct Dimensions {
     pub width: f32,
     pub height: f32,
     pub eye_height: f32,
 }
+/// What `entity_size` (`EntityEvent.Size`) answered for an entity whose size vanilla
+/// recalculated (`Entity.refreshDimensions`) to `vanilla` (width, height, eye height) in
+/// `pose`: `size` replaces it while both still hold. Any change to either goes back to
+/// vanilla's until the hook is asked again; `size` is `None` when the listeners left it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SizeAnswer {
+    pub pose: mod_api::Pose,
+    pub vanilla: [f32; 3],
+    pub size: Option<[f32; 3]>,
+}
+impl SizeAnswer {
+    /// Whether this answer is for `pose` and vanilla's `vanilla`.
+    pub fn asked(&self, pose: mod_api::Pose, vanilla: [f32; 3]) -> bool {
+        self.pose == pose && self.vanilla == vanilla
+    }
+    /// The size to use instead of `vanilla` in `pose`, if this answer still holds.
+    pub fn holds(&self, pose: mod_api::Pose, vanilla: [f32; 3]) -> Option<[f32; 3]> {
+        self.size.filter(|_| self.asked(pose, vanilla))
+    }
+    /// The size the entity had with this answer: the listeners', else vanilla's.
+    pub fn effective(&self) -> [f32; 3] {
+        self.size.unwrap_or(self.vanilla)
+    }
+}
 impl Dimensions {
+    pub fn to_array(self) -> [f32; 3] {
+        [self.width, self.height, self.eye_height]
+    }
+    pub fn from_array([width, height, eye_height]: [f32; 3]) -> Self {
+        Self {
+            width,
+            height,
+            eye_height,
+        }
+    }
+    /// `Avatar.getDefaultDimensions` with the living scale applied, including
+    /// the fixed DYING entry that is not a movement stance.
+    pub fn avatar(pose: mod_api::Pose, scale: f32) -> Self {
+        if pose == mod_api::Pose::Dying {
+            Self {
+                width: 0.2,
+                height: 0.2,
+                eye_height: 1.62,
+            }
+        } else {
+            Pose::from(pose).dimensions(scale)
+        }
+    }
+
     pub fn bounds(self, position: Vec3) -> Aabb {
         let half = f64::from(self.width / 2.0);
         Aabb::new(
@@ -94,7 +174,15 @@ impl PlayerMotion {
         Ok(pose.dimensions(self.attribute("minecraft:scale")? as f32))
     }
     pub fn refresh_dimensions(&mut self) -> Result<()> {
-        self.dimensions = self.dimensions_for_pose(self.pose)?;
+        self.scale = self.attribute("minecraft:scale")? as f32;
+        self.dimensions = self.pose.dimensions(self.scale);
+        // `EntityEvent.Size`: an `entity_size` answer for this pose and size still holds.
+        if let Some(size) = self
+            .size_answer
+            .and_then(|answer| answer.holds(self.pose.into(), self.dimensions.to_array()))
+        {
+            self.dimensions = crate::pose::Dimensions::from_array(size);
+        }
         Ok(())
     }
     pub fn set_pose(&mut self, pose: Pose) -> Result<()> {
@@ -117,8 +205,15 @@ impl PlayerMotion {
         }
         Ok(())
     }
+    /// `LocalPlayer.isMovingSlowly`: crouching, or `Entity.isVisuallyCrawling`
+    /// (visually swimming out of water). `LivingEntity.isVisuallySwimming`
+    /// counts the swimming pose and the fall-flying pose a glide that just
+    /// ended still holds, so the tick after an elytra lands moves at sneaking
+    /// speed (#8295).
     pub fn moving_slowly(&self) -> bool {
-        self.local_crouching || (self.pose == Pose::Swimming && !self.fluids.was_touching_water)
+        let visually_swimming =
+            self.pose == Pose::Swimming || (!self.fall_flying && self.pose == Pose::FallFlying);
+        self.local_crouching || (visually_swimming && !self.fluids.was_touching_water)
     }
 }
 impl MotionWorld<'_, '_, '_> {
@@ -182,8 +277,31 @@ impl MotionWorld<'_, '_, '_> {
     /// `tick`, not the travel): `Entity.updateSwimming` stops a swim, since it
     /// needs `!isPassenger()`, and `updatePlayerPose` follows. A player who
     /// boards a boat while swimming sits up instead of lying under it (#3308).
+    /// The server's `LivingEntity.updateFallFlying` ends a glide the same way
+    /// (`canGlide` needs `!isPassenger()`) and `LivingEntity.tick` resets
+    /// `fallFlyTicks`: a player who boards while gliding sits up instead of
+    /// keeping the glide pose (#3093).
+    /// `Entity.baseTick` still samples the fluids first, in the box the vehicle
+    /// allows (the boat the game stores in the player's fluid state), so a boat
+    /// afloat keeps the eyes dry.
     pub fn passenger_pose_tick(&mut self) -> Result<()> {
+        self.player.fluids.was_eye_in_water = self.player.is_eye_in_fluid(crate::motion::WATER);
+        self.update_fluids()?;
+        // Player.tick: a passenger is never on the ground (setOnGround(false)
+        // clears the supporting block too), so its look packets say so.
+        self.player.ground.on_ground = false;
+        self.player.ground.on_ground_no_blocks = false;
+        self.player.ground.supporting_block = None;
         self.player.swimming = false;
-        self.update_player_pose()
+        self.player.fall_flying = false;
+        self.player.fall_fly_ticks = 0;
+        self.update_player_pose()?;
+        // A cushion's seat puts the feet in the support block, so neither
+        // standing nor crawling fits and `updatePlayerPose` keeps the old
+        // pose. A prior swim would stick (#4509); sit up like a boat rider.
+        if self.player.pose == Pose::Swimming && !self.player.sleeping {
+            self.player.set_pose(Pose::Standing)?;
+        }
+        Ok(())
     }
 }

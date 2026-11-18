@@ -5,7 +5,7 @@
 //! observers for the parity harness; this is the same data with the lookup a
 //! slot needs, and no observer (vanilla's own player uses the plain class).
 use crate::items::ItemStack;
-use horizon_world::nbt::Tag;
+use horizon_core::nbt::Tag;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -34,28 +34,42 @@ impl UseCooldown {
     }
     /// The component as a stack's saved `components` holds it.
     pub fn from_tag(t: &Tag) -> Option<Self> {
+        let (seconds, group) = Self::fields_from_tag(t)?;
+        Some(Self {
+            seconds,
+            group: group.and_then(|tag| match tag {
+                Tag::String(s) => Some(Arc::from(s.to_string_lossy())),
+                _ => None,
+            }),
+        })
+    }
+    /// Borrow the persistent record fields, using `NbtOps`' boxed-number float conversion.
+    /// Codec validation belongs to the caller; this also serves existing saved-stack readers.
+    pub fn fields_from_tag(t: &Tag) -> Option<(f32, Option<&Tag>)> {
         let Tag::Compound(c) = t else {
             return None;
         };
-        let text = |k: &str| match c.get(&horizon_world::nbt::JavaString::from(k)) {
-            Some(Tag::String(s)) => Some(s.to_string_lossy()),
-            _ => None,
+        let field = |name: &str| {
+            c.iter()
+                .find(|(key, _)| key.0.iter().copied().eq(name.encode_utf16()))
+                .map(|(_, value)| value)
         };
-        let seconds = match c.get(&horizon_world::nbt::JavaString::from("seconds")) {
-            Some(Tag::Float(bits)) => f32::from_bits(*bits),
-            Some(Tag::Double(bits)) => f64::from_bits(*bits) as f32,
-            _ => return None,
-        };
-        Some(Self {
-            seconds,
-            group: text("cooldown_group").map(Arc::from),
-        })
+        let seconds = horizon_world::datafix::dynamic::as_number(field("seconds")?)?.float_value();
+        Some((seconds, field("cooldown_group")))
     }
 }
 
 /// The component a stack carries: its own patch first (`ItemStack.get`), then
-/// the item's default from `items.json` (`ItemInfo::use_cooldown`).
+/// the item's default from `items.json` (`ItemInfo::use_cooldown`). A
+/// `!minecraft:use_cooldown` removal patch leaves the lookup empty, so the
+/// prototype default does not come back.
 pub fn component(stack: &ItemStack, default: Option<&UseCooldown>) -> Option<UseCooldown> {
+    if stack
+        .data()
+        .is_some_and(|d| d.other("!minecraft:use_cooldown").is_some())
+    {
+        return None;
+    }
     stack
         .data()
         .and_then(|d| d.other("minecraft:use_cooldown"))
@@ -117,6 +131,12 @@ impl Cooldowns {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+    /// Each group still cooling down and its ticks left, in no set order.
+    pub fn remaining(&self) -> impl Iterator<Item = (&Arc<str>, i32)> {
+        self.entries
+            .iter()
+            .map(|(group, (_, end))| (group, end.wrapping_sub(self.tick_count)))
+    }
 }
 
 #[cfg(test)]
@@ -170,5 +190,20 @@ mod tests {
         assert_eq!(&*group(&grouped, Some(&default)), "minecraft:pearls");
         // An item without the component has no cooldown.
         assert!(component(&stack("minecraft:dirt"), None).is_none());
+    }
+
+    #[test]
+    fn the_seconds_read_from_any_numeric_tag() {
+        let from = |seconds: Tag| UseCooldown::from_tag(&Tag::compound([("seconds", seconds)]));
+        // An integer tag was dropped before (#7638); seconds: 5 is 100 ticks.
+        let int = from(Tag::Int(5)).expect("the component");
+        assert_eq!(int.seconds, 5.0);
+        assert_eq!(int.ticks(), 100);
+        // The other numeric tags read the same way.
+        assert_eq!(from(Tag::Byte(5)).unwrap().seconds, 5.0);
+        assert_eq!(from(Tag::Long(5)).unwrap().seconds, 5.0);
+        assert_eq!(from(Tag::Double(2.5f64.to_bits())).unwrap().seconds, 2.5);
+        // The float path keeps working.
+        assert_eq!(from(Tag::Float(5.0f32.to_bits())).unwrap().seconds, 5.0);
     }
 }

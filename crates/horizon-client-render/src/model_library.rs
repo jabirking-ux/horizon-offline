@@ -1,50 +1,51 @@
 //! Parsed resource models for one startup or resource-pack reload.
-use crate::Result;
-use horizon_assets::{model::CuboidModel, resolve::ModelLibrary};
-use std::{collections::BTreeMap, fs, path::Path, sync::Arc};
+use crate::{Result, resource_source::ResourceSource};
+use horizon_assets::{
+    model::CuboidModel,
+    resolve::{AssetReader, ModelLibrary},
+};
+use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Default)]
 pub struct ParsedModels {
     models: BTreeMap<String, Arc<CuboidModel>>,
+    source: ResourceSource,
+}
+/// Asset files under a content root, for models that name a file (obj).
+struct RootAssets(ResourceSource);
+impl AssetReader for RootAssets {
+    fn read_text(&self, location: &str) -> Option<String> {
+        let (namespace, path) = location.split_once(':')?;
+        // Only a resource location's characters, and no `.`/`..` step: an
+        // .obj's `mtllib` names its .mtl as raw text, so it must not reach a
+        // file outside the content root (`../..:x` as a namespace would).
+        let valid = |c: u8| c.is_ascii_lowercase() || c.is_ascii_digit() || b"_.-".contains(&c);
+        if !namespace.bytes().all(valid)
+            || matches!(namespace, "" | "." | "..")
+            || !path.bytes().all(|c| valid(c) || c == b'/')
+            || path.split('/').any(|part| matches!(part, "" | "." | ".."))
+        {
+            return None;
+        }
+        self.0
+            .read_to_string(&format!("assets/{namespace}/{path}"))
+            .ok()
+    }
 }
 impl ParsedModels {
     /// Every `models/**.json` of a namespace directory, by identifier.
-    pub fn load(root: &Path) -> Self {
-        let Ok(namespaces) = fs::read_dir(root.join("assets")) else {
-            return Self::default();
-        };
-        // Listed first, then read and parsed at once: a content pack has tens
-        // of thousands of models.
-        let mut files = Vec::new();
-        for ns in namespaces.flatten() {
-            let namespace = ns.file_name().to_string_lossy().into_owned();
-            let base = ns.path().join("models");
-            let mut stack = vec![base.clone()];
-            while let Some(dir) = stack.pop() {
-                let Ok(entries) = fs::read_dir(&dir) else {
-                    continue;
-                };
-                for e in entries.flatten() {
-                    let path = e.path();
-                    // The entry's own type saves a stat per file; a link
-                    // (content roots link into the base) is followed.
-                    let is_dir = match e.file_type() {
-                        Ok(t) if !t.is_symlink() => t.is_dir(),
-                        _ => path.is_dir(),
-                    };
-                    if is_dir {
-                        stack.push(path);
-                    } else if path.extension().is_some_and(|x| x == "json")
-                        && let Ok(rel) = path.strip_prefix(&base)
-                    {
-                        let rel = rel.with_extension("").to_string_lossy().replace('\\', "/");
-                        files.push((format!("{namespace}:{rel}"), path));
-                    }
-                }
-            }
-        }
+    pub fn load(source: &ResourceSource) -> Self {
+        let files: Vec<_> = source
+            .list_under("assets", &["models"])
+            .into_iter()
+            .filter_map(|name| {
+                let (namespace, path) = name.strip_prefix("assets/")?.split_once('/')?;
+                let path = path.strip_prefix("models/")?.strip_suffix(".json")?;
+                Some((format!("{namespace}:{path}"), name))
+            })
+            .collect();
         let parsed = crate::par::par_map(&files, |(_, path)| {
-            let text = fs::read_to_string(path).ok()?;
+            let text = source.read_to_string(path).ok()?;
             CuboidModel::from_json(&text).ok().map(Arc::new)
         });
         let models = files
@@ -52,13 +53,20 @@ impl ParsedModels {
             .zip(parsed)
             .filter_map(|((id, _), model)| Some((id, model?)))
             .collect();
-        Self { models }
+        Self {
+            models,
+            source: source.clone(),
+        }
     }
 
     /// Blocks require every referenced resource, including parents. Items instead
     /// skip broken resources and use the resolver's missing-model fallback.
-    pub fn block_library(&self, root: &Path, pending: Vec<String>) -> Result<ModelLibrary> {
-        self.block_models(root, pending, false)
+    pub fn block_library(
+        &self,
+        source: &ResourceSource,
+        pending: Vec<String>,
+    ) -> Result<ModelLibrary> {
+        self.block_models(source, pending, false)
     }
     /// [`Self::block_library`], but a model that does not read takes the
     /// built-in missing model, logged, as vanilla's model discovery does
@@ -66,14 +74,14 @@ impl ParsedModels {
     /// always read.
     pub fn block_library_or_missing(
         &self,
-        root: &Path,
+        source: &ResourceSource,
         pending: Vec<String>,
     ) -> Result<ModelLibrary> {
-        self.block_models(root, pending, true)
+        self.block_models(source, pending, true)
     }
     fn block_models(
         &self,
-        root: &Path,
+        source: &ResourceSource,
         mut pending: Vec<String>,
         or_missing: bool,
     ) -> Result<ModelLibrary> {
@@ -89,9 +97,8 @@ impl ParsedModels {
                     let read = || -> Result<CuboidModel> {
                         let (namespace, path) =
                             name.split_once(':').ok_or("invalid model identifier")?;
-                        let text = fs::read_to_string(
-                            root.join(format!("assets/{namespace}/models/{path}.json")),
-                        )?;
+                        let text = source
+                            .read_to_string(&format!("assets/{namespace}/models/{path}.json"))?;
                         Ok(CuboidModel::from_json(&text)?)
                     };
                     match read() {
@@ -105,16 +112,23 @@ impl ParsedModels {
                     }
                 }
             };
-            if let Some(parent) = &model.parent {
-                pending.push(parent.clone());
-            }
+            pending.extend(model.referenced_models());
             models.insert(name, model);
         }
-        Ok(ModelLibrary::from_shared(models)?)
+        Ok(ModelLibrary::from_shared(models)?
+            .with_assets(Arc::new(RootAssets(source.clone())))
+            .with_loaders(Arc::new(crate::mod_model_loaders::ModLoaders)))
     }
     pub fn into_item_library(self) -> std::result::Result<Arc<ModelLibrary>, String> {
+        let source = self.source;
         ModelLibrary::with_shared_item_generator(self.models)
-            .map(Arc::new)
+            .map(|library| {
+                Arc::new(
+                    library
+                        .with_assets(Arc::new(RootAssets(source)))
+                        .with_loaders(Arc::new(crate::mod_model_loaders::ModLoaders)),
+                )
+            })
             .map_err(|e| format!("item models: {e:?}"))
     }
 }
@@ -123,6 +137,46 @@ impl ParsedModels {
 mod tests {
     use super::*;
     use horizon_assets::resolve::{GENERATED_MODEL, MISSING_MODEL};
+    use std::fs;
+
+    #[test]
+    fn archive_models_and_auxiliary_files_load_without_an_asset_directory() -> Result<()> {
+        use std::io::Write;
+        let fixture = Fixture(
+            std::env::temp_dir().join(format!("horizon-archive-models-{}", std::process::id())),
+        );
+        fs::create_dir_all(&fixture.0)?;
+        let path = fixture.0.join("models.jar");
+        let mut writer = zip::ZipWriter::new(fs::File::create(&path)?);
+        for (name, bytes) in [
+            ("assets/demo/models/block/base.json", br##"{"textures":{"all":"demo:block/stone"},"elements":[{"from":[0,0,0],"to":[16,16,16],"faces":{"north":{"texture":"#all"}}}]}"##.as_slice()),
+            ("assets/demo/models/block/child.json", br#"{"parent":"demo:block/base"}"#),
+            ("assets/demo/models/cube.obj", b"mtllib cube.mtl\nv 0 0 0\n"),
+            ("assets/demo/models/cube.mtl", b"newmtl cube\n"),
+        ] {
+            writer.start_file(name, zip::write::SimpleFileOptions::default())?;
+            writer.write_all(bytes)?;
+        }
+        writer.finish()?;
+        let source = ResourceSource::archive(&path)?;
+        let parsed = ParsedModels::load(&source);
+        let library = parsed.block_library(&source, vec!["demo:block/child".into()])?;
+        let child = library.resolve("demo:block/child")?;
+        assert_eq!(child.elements().len(), 1);
+        assert_eq!(child.material("all")?.unwrap().sprite, "demo:block/stone");
+        let assets = RootAssets(source);
+        assert_eq!(
+            assets.read_text("demo:models/cube.obj").as_deref(),
+            Some("mtllib cube.mtl\nv 0 0 0\n")
+        );
+        assert_eq!(
+            assets.read_text("demo:models/cube.mtl").as_deref(),
+            Some("newmtl cube\n")
+        );
+        assert!(!fixture.0.join("assets").exists());
+        assert_eq!(fs::read_dir(&fixture.0)?.count(), 1);
+        Ok(())
+    }
 
     struct Fixture(std::path::PathBuf);
     impl Fixture {
@@ -157,7 +211,7 @@ mod tests {
             r#"{"elements":[{"from":[0,0,0],"to":[1,1,1],"faces":{"up":{"texture":"particle"}}}],"gui_light":"side"}"#,
         );
         fixture.write(MISSING_MODEL, r#"{"elements":[]}"#);
-        let parsed = ParsedModels::load(&fixture.0);
+        let parsed = ParsedModels::load(&ResourceSource::directory(fixture.0.clone()));
         let direct = ParsedModels::default();
         let names = vec![
             "horizon:nested/child".into(),
@@ -165,8 +219,9 @@ mod tests {
             MISSING_MODEL.into(),
             "horizon:a".into(),
         ];
-        let old = direct.block_library(&fixture.0, names.clone())?;
-        let shared = parsed.block_library(&fixture.0, names)?;
+        let old =
+            direct.block_library(&ResourceSource::directory(fixture.0.clone()), names.clone())?;
+        let shared = parsed.block_library(&ResourceSource::directory(fixture.0.clone()), names)?;
         for name in ["horizon:nested/child", GENERATED_MODEL, MISSING_MODEL] {
             assert_eq!(
                 format!("{:?}", old.resolve(name)?),
@@ -177,14 +232,20 @@ mod tests {
         for name in ["horizon:broken", "horizon:absent", "horizon:dangling"] {
             let load = |models: &ParsedModels| {
                 models
-                    .block_library(&fixture.0, vec![name.into()])
+                    .block_library(
+                        &ResourceSource::directory(fixture.0.clone()),
+                        vec![name.into()],
+                    )
                     .err()
                     .unwrap()
                     .to_string()
             };
             assert_eq!(load(&direct), load(&parsed));
             // Mods' content: vanilla's missing model instead of an error.
-            let lenient = parsed.block_library_or_missing(&fixture.0, vec![name.into()])?;
+            let lenient = parsed.block_library_or_missing(
+                &ResourceSource::directory(fixture.0.clone()),
+                vec![name.into()],
+            )?;
             assert_eq!(
                 format!("{:?}", lenient.resolve(name)?.elements()),
                 format!("{:?}", lenient.resolve(MISSING_MODEL)?.elements()),
@@ -215,7 +276,8 @@ mod tests {
         }
         assert!(items.resolve("horizon:a").is_err());
         fixture.write("horizon:parent", r#"{"elements":[]}"#);
-        let reloaded = ParsedModels::load(&fixture.0).into_item_library()?;
+        let reloaded = ParsedModels::load(&ResourceSource::directory(fixture.0.clone()))
+            .into_item_library()?;
         assert!(
             reloaded
                 .resolve("horizon:nested/child")?
@@ -226,13 +288,43 @@ mod tests {
         // An unrelated bad item identifier must not make block preparation fail
         // (which would trigger resource-pack rollback at a different stage).
         fixture.write("horizon:INVALID", "{}");
-        let parsed = ParsedModels::load(&fixture.0);
+        let parsed = ParsedModels::load(&ResourceSource::directory(fixture.0.clone()));
         assert!(
             parsed
-                .block_library(&fixture.0, vec!["horizon:nested/child".into()])
+                .block_library(
+                    &ResourceSource::directory(fixture.0.clone()),
+                    vec!["horizon:nested/child".into()]
+                )
                 .is_ok()
         );
         assert!(parsed.into_item_library().is_err());
         Ok(())
+    }
+
+    /// An .obj's `mtllib` is raw text: no namespace or path step reaches a
+    /// file outside the content root.
+    #[test]
+    fn root_assets_stay_inside_the_content_root() {
+        let root = std::env::temp_dir().join(format!("horizon-root-assets-{}", std::process::id()));
+        let inside = root.join("content");
+        fs::create_dir_all(inside.join("assets/m/models")).unwrap();
+        fs::write(inside.join("assets/m/models/a.mtl"), "newmtl a").unwrap();
+        fs::write(root.join("secret.mtl"), "newmtl secret").unwrap();
+        let assets = RootAssets(ResourceSource::directory(inside));
+        assert_eq!(
+            assets.read_text("m:models/a.mtl").as_deref(),
+            Some("newmtl a")
+        );
+        for escape in [
+            "../..:secret.mtl",
+            "..:../secret.mtl",
+            "m:../../../secret.mtl",
+            "m:models/./a.mtl",
+            "M:models/a.mtl",
+            ":models/a.mtl",
+        ] {
+            assert_eq!(assets.read_text(escape), None, "{escape}");
+        }
+        fs::remove_dir_all(&root).unwrap();
     }
 }

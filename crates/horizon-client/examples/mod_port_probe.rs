@@ -3,15 +3,17 @@
 //! writes what Horizon makes of every block state, drop, recipe and tag the
 //! NeoForge oracle exported.
 //!
-//! cargo run -p horizon-client --example mod_port_probe -- PREPARED WORK OUT.json [MOD...]
+//! cargo run -p horizon-client-lib --example mod_port_probe -- PREPARED WORK OUT.json [MOD...]
 //!
 //! WORK is a `horizon-port-pack` work folder: `oracle/facts.json` and
 //! `mods/<id>/carry/`. The root is built in `WORK/horizon-root`.
+extern crate horizon_client_lib as horizon_client;
 use horizon_client::{
     Result,
     assets::Assets,
     blocks::BlockFacts,
     crafting::{Recipe, Recipes},
+    enchant::Enchantments,
     items::{ItemStack, Items},
     mod_content::{self, ContentMod},
     stations::StationRecipes,
@@ -45,6 +47,26 @@ fn tool(name: &str) -> Option<ItemStack> {
     }
 }
 
+/// An equipment asset's first humanoid layers as files under the root, as worn armour reads them.
+fn equipment_textures(root: &Path, asset: &str) -> Value {
+    let (ns, path) = asset.split_once(':').unwrap_or(("minecraft", asset));
+    let Ok(doc) = fs::read(root.join(format!("assets/{ns}/equipment/{path}.json"))) else {
+        return Value::Null;
+    };
+    let doc: Value = serde_json::from_slice(&doc).unwrap_or_default();
+    let mut out = Map::new();
+    for kind in ["humanoid", "humanoid_leggings"] {
+        if let Some(texture) = doc["layers"][kind][0]["texture"].as_str() {
+            let (tns, tpath) = texture.split_once(':').unwrap_or(("minecraft", texture));
+            let file = root.join(format!(
+                "assets/{tns}/textures/entity/equipment/{kind}/{tpath}.png"
+            ));
+            out.insert(kind.into(), json!(file.exists().then_some(file)));
+        }
+    }
+    Value::Object(out)
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [base, work, out, wanted @ ..] = args.as_slice() else {
@@ -53,17 +75,20 @@ fn main() -> Result<()> {
     let (base, work) = (Path::new(base), Path::new(work));
     let oracle: Value = serde_json::from_slice(&fs::read(work.join("oracle/facts.json"))?)?;
     let mut mods = Vec::new();
+    let mut inventory = Vec::new();
     for entry in fs::read_dir(work.join("mods"))?.flatten() {
         let id = entry.file_name().to_string_lossy().into_owned();
         let dir = entry.path().join("carry");
         if !(wanted.is_empty() || wanted.contains(&id)) || !dir.is_dir() {
             continue;
         }
-        let package = horizon_mods::Package::read(&dir)?;
-        let content = horizon_mods::Content::read(&dir, &package.manifest)?;
+        let package = horizon_mod_package::Package::read(&dir)?;
+        let content = horizon_mod_package::Content::read(&dir, &package.manifest)?;
+        inventory.push((package.manifest.id.clone(), package.manifest.side));
         mods.push(ContentMod {
             id: package.manifest.id.clone(),
             content,
+            jars: package.manifest.jar,
         });
     }
     mods.sort_by(|a, b| a.id.cmp(&b.id));
@@ -73,14 +98,26 @@ fn main() -> Result<()> {
         let what = what.to_owned();
         move |e: Box<dyn std::error::Error>| format!("{what}: {e}")
     };
-    mod_content::build(base, &mods, &root).map_err(step("content root"))?;
+    mod_content::build(
+        base,
+        &horizon_client::logging::game_home().join("jars"),
+        &mods,
+        &root,
+        &horizon_mod_package::enabled::EnabledMods::new(inventory),
+    )
+    .map_err(step("content root"))?;
     let built = began.elapsed().as_secs_f64();
     let assets = Assets::load(&root).map_err(step("assets"))?;
     let registry = assets.registry;
     let facts = BlockFacts::load(&root, registry).map_err(step("block facts"))?;
-    let items = Items::load(&root, registry, &facts, &PackOverlay::NONE).map_err(step("items"))?;
-    let recipes = Recipes::load(&root, &items, &PackOverlay::NONE).map_err(step("recipes"))?;
-    let stations = StationRecipes::load(&root, &items, &PackOverlay::NONE);
+    let defaults =
+        horizon_world::item_defaults::read(&root).map_err(|error| format!("items: {error}"))?;
+    let items = Items::load(&root, registry, &facts, &PackOverlay::NONE, &defaults)
+        .map_err(step("items"))?;
+    let recipes = Recipes::load(&root, &items, &PackOverlay::NONE, &server_load())
+        .map_err(step("recipes"))?;
+    let stations = StationRecipes::load(&root, &items, &PackOverlay::NONE, &server_load());
+    let enchantments = Enchantments::load(&root, &defaults)?;
     let collisions =
         horizon_client::collisions::load(&root, registry).map_err(step("collisions"))?;
     let loaded = began.elapsed().as_secs_f64() - built;
@@ -111,7 +148,7 @@ fn main() -> Result<()> {
                 .collect();
             let descriptor = BlockState {
                 name: name.clone(),
-                properties,
+                properties: properties.into(),
             };
             let Some(id) = registry.id(&descriptor) else {
                 states.insert(key.clone(), Value::Null);
@@ -154,7 +191,11 @@ fn main() -> Result<()> {
                     let mut random = LegacyRandom::new(0);
                     let held = tool(t);
                     let mut counts: BTreeMap<String, u32> = BTreeMap::new();
-                    for s in items.block_drops(registry, id, held.as_ref(), &mut random) {
+                    let roll = horizon_client::items::BlockLootRoll {
+                        held: held.as_ref(),
+                        ..Default::default()
+                    };
+                    for s in items.block_drops(registry, id, roll, &mut random, None) {
                         *counts.entry(s.item.to_string()).or_default() += s.count;
                     }
                     drops.insert(t.clone(), json!(counts));
@@ -198,7 +239,36 @@ fn main() -> Result<()> {
         item_rows.insert(
             name.clone(),
             match items.items.get(name.as_str()) {
-                Some(i) => json!({"max_stack_size": i.max_stack, "block": i.block.map(|b| b.0)}),
+                Some(i) => {
+                    let props = enchantments.props(name);
+                    let repairable: Vec<String> = props
+                        .into_iter()
+                        .flat_map(|p| &p.repairable)
+                        .flat_map(|r| match r.strip_prefix('#') {
+                            Some(tag) => items.item_tag_order.get(tag).cloned().unwrap_or_default(),
+                            None => vec![r.clone()],
+                        })
+                        .collect();
+                    json!({
+                        "max_stack_size": i.max_stack,
+                        "block": i.block.map(|b| b.0),
+                        "max_damage": i.max_damage,
+                        "modifiers": i.modifiers.iter().map(|m| {
+                            json!({"type": m.attribute, "id": m.id, "amount": m.amount, "operation": m.operation, "slot": m.slot})
+                        }).collect::<Vec<_>>(),
+                        "tool": i.tool_damage_per_block.map(|per_block| json!({
+                            "rules": i.tool.iter().map(|r| json!({"blocks": r.blocks, "speed": r.speed, "correct_for_drops": r.correct})).collect::<Vec<_>>(),
+                            "default_mining_speed": i.tool_default_speed,
+                            "damage_per_block": per_block,
+                        })),
+                        "enchantable": props.map_or(0, |p| p.enchantable),
+                        "repairable": repairable,
+                        "equip_slot": i.equip_slot,
+                        "equip_asset": i.equip_asset,
+                        "equipment": i.equip_asset.as_deref().map(|a| equipment_textures(&root, a)),
+                        "food": i.food.map(|(nutrition, saturation)| json!({"nutrition": nutrition, "saturation": saturation})),
+                    })
+                }
                 None => Value::Null,
             },
         );
@@ -218,14 +288,14 @@ fn main() -> Result<()> {
         let row = match recipe {
             Recipe::Shaped { cells, result, .. } => json!({
                 "result": result.item.as_deref(), "count": result.count,
-                "ingredients": cells.iter().flatten().map(|i| sorted(&i.1)).collect::<Vec<_>>()}),
+                "ingredients": cells.iter().flatten().map(|i| sorted(&i.order)).collect::<Vec<_>>()}),
             Recipe::Shapeless {
                 ingredients,
                 result,
             } => json!({
                 "result": result.item.as_deref(), "count": result.count,
-                "ingredients": ingredients.iter().map(|i| sorted(&i.1)).collect::<Vec<_>>()}),
-            Recipe::Special(_) => json!({"special": true}),
+                "ingredients": ingredients.iter().map(|i| sorted(&i.order)).collect::<Vec<_>>()}),
+            Recipe::Special(_) | Recipe::Mod(_) => json!({"special": true}),
         };
         recipe_rows.insert(name.clone(), row);
     }
@@ -233,14 +303,14 @@ fn main() -> Result<()> {
         recipe_rows.insert(
             c.id.clone(),
             json!({"result": &*c.result.item, "count": c.result.count,
-                "ingredients": [sorted(&c.ingredient.1)]}),
+                "ingredients": [sorted(&c.ingredient.order)]}),
         );
     }
     for s in stations.stonecutting.iter().filter(|s| ours(&s.id)) {
         recipe_rows.insert(
             s.id.clone(),
             json!({"result": &*s.result.item, "count": s.result.count,
-                "ingredients": [sorted(&s.input.1)]}),
+                "ingredients": [sorted(&s.input.order)]}),
         );
     }
 
@@ -271,4 +341,13 @@ fn main() -> Result<()> {
         recipe_rows.len()
     );
     Ok(())
+}
+
+fn server_load() -> horizon_world::native_load_context::LoadContext {
+    use horizon_world::native_load_context::{DataLoadOrigin, LoadContext, LoadInputs};
+    LoadContext::new(
+        DataLoadOrigin::ServerDataLoad,
+        std::sync::Arc::new(LoadInputs::new(Default::default(), Default::default())),
+        [],
+    )
 }

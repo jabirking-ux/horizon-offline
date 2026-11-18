@@ -69,6 +69,7 @@ pub enum Error {
     ForeignInstance,
     DuplicateModifier(String),
 }
+#[derive(Clone)]
 struct Node {
     handle: Handle,
     key: Key,
@@ -88,6 +89,7 @@ impl Observer for Dirty<'_> {
             .modified(Some(self.handle.clone()), |_, _| Ok(self.syncable))
     }
 }
+#[derive(Clone)]
 struct Data<G> {
     catalog: Arc<Catalog>,
     bases: Arc<[Option<f64>]>,
@@ -101,6 +103,21 @@ impl<G: FnMut() -> i32> Data<G> {
         Arc::ptr_eq(&self.catalog, &key.catalog)
             .then(|| self.bases[key.id.index()])
             .flatten()
+    }
+    fn supplier_read(&self, key: Option<&Key>, kind: ValueKind) -> Result<f64, Error> {
+        let key = key.ok_or(Error::NullAttribute)?;
+        let base = self.base(key).ok_or(Error::MissingAttribute)?;
+        Ok(match kind {
+            ValueKind::Base => base,
+            ValueKind::Computed => self.catalog.attribute(key.id).definition.sanitize(base),
+        })
+    }
+    fn instance_read(&self, handle: &Handle, kind: ValueKind) -> Result<f64, Error> {
+        let value = &self.node(handle)?.value;
+        Ok(match kind {
+            ValueKind::Computed => value.value(),
+            ValueKind::Base => value.base_value(),
+        })
     }
     fn node(&self, h: &Handle) -> Result<&Node, Error> {
         if !Arc::ptr_eq(&self.owner, &h.owner) {
@@ -196,12 +213,7 @@ impl<G: FnMut() -> i32> QueryWorld<Key, Handle> for Data<G> {
         key: Option<Key>,
         kind: ValueKind,
     ) -> Result<f64, Error> {
-        let key = key.ok_or(Error::NullAttribute)?;
-        let base = self.base(&key).ok_or(Error::MissingAttribute)?;
-        Ok(match kind {
-            ValueKind::Base => base,
-            ValueKind::Computed => self.catalog.attribute(key.id).definition.sanitize(base),
-        })
+        self.supplier_read(key.as_ref(), kind)
     }
     fn supplier_modifier_value(
         &mut self,
@@ -219,11 +231,7 @@ impl<G: FnMut() -> i32> QueryWorld<Key, Handle> for Data<G> {
         h: Handle,
         kind: ValueKind,
     ) -> Result<f64, Error> {
-        let value = &mut self.node_mut(&h)?.value;
-        Ok(match kind {
-            ValueKind::Computed => value.value(),
-            ValueKind::Base => value.base_value(),
-        })
+        self.instance_read(&h, kind)
     }
     fn instance_modifier(
         &mut self,
@@ -271,9 +279,25 @@ impl<G: FnMut() -> i32> AttributeAccess<Key, Handle> for Data<G> {
         self.edit(map, h, |a, o| a.add_permanent(modifier, o))
     }
 }
+/// An identity allocator that can be copied with its state, so the attributes holding it can be.
+pub trait Identities: FnMut() -> i32 {
+    fn clone_box(&self) -> Box<dyn Identities>;
+}
+impl<F: FnMut() -> i32 + Clone + 'static> Identities for F {
+    fn clone_box(&self) -> Box<dyn Identities> {
+        Box::new(self.clone())
+    }
+}
+impl Clone for Box<dyn Identities> {
+    fn clone(&self) -> Self {
+        // The boxed allocator's own copy, not a box around this box.
+        (**self).clone_box()
+    }
+}
 /// Owns an entity's instances and pending queues. Holder hashes come from the
 /// registry runtime; instance hashes come from the supplied identity allocator.
 /// Supplying oracle hashes permits reproducible JVM-order differential checks.
+#[derive(Clone)]
 pub struct LiveAttributes<G> {
     map: AttributeMap<Key, Handle>,
     data: Data<G>,
@@ -334,8 +358,47 @@ impl<G: FnMut() -> i32> LiveAttributes<G> {
     pub fn has_modifier(&mut self, key: Option<Key>, id: &str) -> Result<bool, Error> {
         self.map.has_modifier(key, id, &mut self.data)
     }
-    pub fn value(&mut self, key: Option<Key>, kind: ValueKind) -> Result<f64, Error> {
-        self.map.value(key, kind, &mut self.data)
+    pub fn value(&self, key: Option<Key>, kind: ValueKind) -> Result<f64, Error> {
+        if let Some(handle) = self.map.instances.get(key.as_ref()) {
+            return self.data.instance_read(&handle, kind);
+        }
+        self.data.supplier_read(key.as_ref(), kind)
+    }
+    /// The computed value exactly as the instance's cache holds it, without
+    /// recomputing a dirty instance. An absent instance reads its supplier
+    /// base, the same fallback `AttributeMap.getValue` uses (only an instance
+    /// carries modifiers). Native `AttributeInstance.getValue` is the only
+    /// thing that recomputes and clears the dirty flag, so a reader vanilla
+    /// performs on some paths only must take this rather than `value`.
+    pub fn cached_value(&self, key: Option<&Key>) -> Result<f64, Error> {
+        if let Some(handle) = self.map.instances.get(key) {
+            return Ok(self.data.node(&handle)?.value.cached_value());
+        }
+        self.data.supplier_read(key, ValueKind::Computed)
+    }
+    /// `cached_value` of the attribute with this registered name.
+    pub fn cached_value_of(&self, name: &str) -> Result<f64, Error> {
+        let key = self.key(name).ok_or(Error::MissingAttribute)?;
+        self.cached_value(Some(&key))
+    }
+    /// The computed value of the attribute, calculating current dirty modifiers if needed.
+    pub fn computed_value(&self, key: Option<&Key>) -> Result<f64, Error> {
+        if let Some(handle) = self.map.instances.get(key) {
+            return Ok(self.data.node(&handle)?.value.compute_value());
+        }
+        let key = key.ok_or(Error::NullAttribute)?;
+        let base = self.data.base(key).ok_or(Error::MissingAttribute)?;
+        Ok(self
+            .data
+            .catalog
+            .attribute(key.id)
+            .definition
+            .sanitize(base))
+    }
+    /// `computed_value` of the attribute with this registered name.
+    pub fn computed_value_of(&self, name: &str) -> Result<f64, Error> {
+        let key = self.key(name).ok_or(Error::MissingAttribute)?;
+        self.computed_value(Some(&key))
     }
     pub fn modifier_value(&mut self, key: Option<Key>, id: &str) -> Result<f64, Error> {
         self.map

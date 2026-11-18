@@ -7,8 +7,9 @@ use crate::{
     hud::{Blend, EndPortalFill, HudAtlas, HudBatch},
     text::{self, Style, Text},
 };
+use horizon_assets::resource_source::ResourceSource;
 use horizon_core::random::{LegacyRandom, RandomSource};
-use std::{collections::HashSet, path::Path};
+use std::collections::HashSet;
 
 /// `WinScreen.OBFUSCATE_TOKEN`: `§f§k§a§b` marks where the poem hides a name.
 const OBFUSCATE_TOKEN: &str = "\u{a7}f\u{a7}k\u{a7}a\u{a7}b";
@@ -50,11 +51,15 @@ pub struct WinScreen {
     unmodified_scroll_speed: f32,
     scroll_speed: f32,
     direction: i32,
+    /// `narratorComponents` joined for narration (`getNarrationMessage`):
+    /// the poem's lines as read, the credits' names and titles (not the
+    /// section rules), an empty part for each empty line.
+    narration: String,
 }
 impl WinScreen {
     /// `WinScreen.<init>` and `init`: the poem (`texts/end.txt`) when `poem`,
     /// the credits (`texts/credits.json`), then `texts/postcredits.txt`.
-    pub fn new(poem: bool, root: &Path, player: &str, font: &Font) -> Self {
+    pub fn new(poem: bool, root: &ResourceSource, player: &str, font: &Font) -> Self {
         let speed = if poem { 0.5 } else { 0.75 };
         let mut screen = Self {
             poem,
@@ -67,9 +72,11 @@ impl WinScreen {
             unmodified_scroll_speed: speed,
             scroll_speed: speed,
             direction: 1,
+            narration: String::new(),
         };
-        let texts = root.join("assets/minecraft/texts");
-        let read = |name: &str| match std::fs::read_to_string(texts.join(name)) {
+        let mut narrated = Vec::new();
+        let read = |name: &str| match root.read_to_string(&format!("assets/minecraft/texts/{name}"))
+        {
             Ok(s) => Some(s),
             Err(e) => {
                 log::error!("Couldn't load credits from file minecraft:texts/{name}: {e}");
@@ -77,26 +84,33 @@ impl WinScreen {
             }
         };
         if poem && let Some(s) = read("end.txt") {
-            screen.add_poem_file(&s, player, font);
+            screen.add_poem_file(&s, player, font, &mut narrated);
         }
         if let Some(s) = read("credits.json") {
             match serde_json::from_str(&s) {
-                Ok(json) => screen.add_credits_file(&json),
+                Ok(json) => screen.add_credits_file(&json, &mut narrated),
                 Err(e) => {
                     log::error!("Couldn't load credits from file minecraft:texts/credits.json: {e}")
                 }
             }
         }
         if poem && let Some(s) = read("postcredits.txt") {
-            screen.add_poem_file(&s, player, font);
+            screen.add_poem_file(&s, player, font, &mut narrated);
         }
         screen.total_scroll_length = screen.lines.len() as i32 * 12;
+        screen.narration = narrated.join(". ");
         screen
+    }
+    /// What the screen narrates: no title of its own
+    /// (`GameNarrator.NO_TITLE`), its `getNarrationMessage` is
+    /// `joinForNarration` of the narrator's parts.
+    pub fn screen_info(&self) -> crate::widgets::ScreenInfo {
+        crate::widgets::ScreenInfo::new("win", self.narration.clone())
     }
     /// `addPoemFile`: each line with the player's name in, its obfuscated
     /// spans turned into 3 to 6 scrambled characters, wrapped at 256 pixels
     /// and followed by an empty line; 8 more empty lines at the end.
-    fn add_poem_file(&mut self, file: &str, player: &str, font: &Font) {
+    fn add_poem_file(&mut self, file: &str, player: &str, font: &Font, narrated: &mut Vec<String>) {
         let mut random = LegacyRandom::new(8124371);
         // BufferedReader.readLine: \n, \r or \r\n end a line; no empty last line.
         let mut lines: Vec<&str> = file
@@ -120,50 +134,58 @@ impl WinScreen {
             let text = Text::legacy(&line);
             self.lines
                 .extend(font.split_lines(&text, 256.0).into_iter().map(|(t, _)| t));
-            self.add_empty_line();
+            // addPoemLines: the line as read, its codes and all
+            // (`Component.literal(line)`).
+            narrated.push(line);
+            self.add_empty_line(narrated);
         }
         for _ in 0..8 {
-            self.add_empty_line();
+            self.add_empty_line(narrated);
         }
     }
     /// `addCreditsFile`: each section's heading, then each discipline's name
     /// and its titles with the names under them.
-    fn add_credits_file(&mut self, json: &serde_json::Value) {
+    fn add_credits_file(&mut self, json: &serde_json::Value, narrated: &mut Vec<String>) {
         let colored = |s: &str, color: u32| Text::styled(s, Style::color(color));
         let heading = || colored(SECTION_HEADING, text::WHITE);
         for section in json.as_array().into_iter().flatten() {
             let name = section["section"].as_str().unwrap_or_default();
-            self.add_credits_line(heading(), true);
-            self.add_credits_line(colored(name, text::YELLOW), true);
-            self.add_credits_line(heading(), true);
-            self.add_empty_line();
-            self.add_empty_line();
+            self.add_credits_line(heading(), true, None);
+            self.add_credits_line(colored(name, text::YELLOW), true, Some(narrated));
+            self.add_credits_line(heading(), true, None);
+            self.add_empty_line(narrated);
+            self.add_empty_line(narrated);
             for discipline in section["disciplines"].as_array().into_iter().flatten() {
                 let name = discipline["discipline"].as_str().unwrap_or_default();
                 if !name.is_empty() {
-                    self.add_credits_line(colored(name, text::YELLOW), true);
-                    self.add_empty_line();
-                    self.add_empty_line();
+                    self.add_credits_line(colored(name, text::YELLOW), true, Some(narrated));
+                    self.add_empty_line(narrated);
+                    self.add_empty_line(narrated);
                 }
                 for title in discipline["titles"].as_array().into_iter().flatten() {
                     let name = title["title"].as_str().unwrap_or_default();
-                    self.add_credits_line(colored(name, text::GRAY), false);
+                    self.add_credits_line(colored(name, text::GRAY), false, Some(narrated));
                     for name in title["names"].as_array().into_iter().flatten() {
                         let line = format!("{NAME_PREFIX}{}", name.as_str().unwrap_or_default());
-                        self.add_credits_line(colored(&line, text::WHITE), false);
+                        self.add_credits_line(colored(&line, text::WHITE), false, Some(narrated));
                     }
-                    self.add_empty_line();
-                    self.add_empty_line();
+                    self.add_empty_line(narrated);
+                    self.add_empty_line(narrated);
                 }
             }
         }
     }
-    fn add_empty_line(&mut self) {
+    fn add_empty_line(&mut self, narrated: &mut Vec<String>) {
         self.lines.push(Text::empty());
+        narrated.push(String::new());
     }
-    fn add_credits_line(&mut self, line: Text, centered: bool) {
+    /// `addCreditsLine`; `narrated` when the narrator reads it too.
+    fn add_credits_line(&mut self, line: Text, centered: bool, narrated: Option<&mut Vec<String>>) {
         if centered {
             self.centered.insert(self.lines.len());
+        }
+        if let Some(narrated) = narrated {
+            narrated.push(line.plain());
         }
         self.lines.push(line);
     }
@@ -211,16 +233,11 @@ impl WinScreen {
         self.scroll = scroll;
         self.scroll_speed = 0.0;
     }
-    /// `extractRenderState` after a frame of `delta_ticks` game ticks:
-    /// `extractBackground`, the vignette, then the logo and the lines
-    /// scrolled up. The poem's End portal background samples `end_portal`;
-    /// the credits draw the scrolling menu background (over the blurred
-    /// panorama on the title screen).
-    pub fn draw(
-        &mut self,
+    /// The poem's End portal or scrolling credits background and vignette.
+    pub fn draw_background(
+        &self,
         batch: &mut HudBatch,
         atlas: &HudAtlas,
-        delta_ticks: f32,
         end_portal: EndPortalFill,
     ) {
         let (w, h) = (batch.width, batch.height);
@@ -238,6 +255,11 @@ impl WinScreen {
             batch.rect_uv(0.0, 0.0, w, h, r, u32::MAX);
             batch.blend_since(start, Blend::Vignette);
         }
+    }
+
+    /// Advance by `delta_ticks`, then draw the rolling logo and text.
+    pub fn draw_contents(&mut self, batch: &mut HudBatch, atlas: &HudAtlas, delta_ticks: f32) {
+        let (w, h) = (batch.width, batch.height);
         self.scroll = (self.scroll + delta_ticks * self.scroll_speed).max(0.0);
         let logo_x = (w / 2.0).floor() - 128.0;
         let logo_y = h + 50.0;
@@ -305,25 +327,28 @@ impl WinScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     /// A resource root with only the credits texts: every glyph is the
     /// missing one, 6 pixels wide.
     fn screen(poem: bool, end: &str, credits: &str, post: &str) -> WinScreen {
-        // One directory per call: tests run in parallel, and two of them with
-        // the same arguments used to remove each other's files.
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("horizon-win-screen-{}-{n}", std::process::id()));
-        let texts = root.join("assets/minecraft/texts");
-        std::fs::create_dir_all(&texts).unwrap();
-        std::fs::write(texts.join("end.txt"), end).unwrap();
-        std::fs::write(texts.join("credits.json"), credits).unwrap();
-        std::fs::write(texts.join("postcredits.txt"), post).unwrap();
-        let atlas = HudAtlas::fonts(&root).unwrap();
-        let screen = WinScreen::new(poem, &root, "Steve", &atlas.font);
-        let _ = std::fs::remove_dir_all(&root);
-        screen
+        use horizon_assets::resource_source::Resource;
+        let source = ResourceSource::indexed(std::collections::BTreeMap::from([
+            (
+                "assets/minecraft/texts/end.txt".into(),
+                Resource::bytes(end.as_bytes().to_vec()),
+            ),
+            (
+                "assets/minecraft/texts/credits.json".into(),
+                Resource::bytes(credits.as_bytes().to_vec()),
+            ),
+            (
+                "assets/minecraft/texts/postcredits.txt".into(),
+                Resource::bytes(post.as_bytes().to_vec()),
+            ),
+        ]));
+        let atlas = HudAtlas::fonts(&source).unwrap();
+        WinScreen::new(poem, &source, "Steve", &atlas.font)
     }
     const CREDITS: &str = r#"[{"section":"Studio","disciplines":[
         {"discipline":"","titles":[{"title":"Head","names":["Ada","Bo"]}]},
@@ -411,6 +436,22 @@ mod tests {
                 Some(text::YELLOW)
             ]
         );
+        // narratorComponents: the section rules aren't read, empty lines are
+        // empty parts.
+        let p = NAME_PREFIX;
+        assert_eq!(
+            s.screen_info().title,
+            format!("Studio. . . Head. {p}Ada. {p}Bo. . . Art. . . Artist. . ")
+        );
+    }
+
+    #[test]
+    fn the_poem_is_narrated_as_read_line_by_line() {
+        let s = screen(true, "Hello PLAYERNAME.\n", "[]", "End.");
+        let empty = ". ".repeat(9);
+        let poem = format!("Hello Steve.{empty}. End.{empty}");
+        assert_eq!(s.screen_info().title, poem);
+        assert_eq!(s.screen_info().id, "win");
     }
 
     #[test]
@@ -436,18 +477,24 @@ mod tests {
     #[test]
     fn the_screen_ends_once_everything_rolled_past() {
         let mut s = screen(false, "", CREDITS, "");
-        let atlas = HudAtlas::fonts(Path::new("/nonexistent")).unwrap();
-        let mut batch = HudBatch::new([640, 480]);
+        let atlas = HudAtlas::fonts(&horizon_assets::resource_source::ResourceSource::directory(
+            (Path::new("/nonexistent")).to_owned(),
+        ))
+        .unwrap();
+        let mut batch = HudBatch::scratch([640, 480]);
         let h = batch.height;
         let end = (s.total_scroll_length as f32 + 2.0 * h + 24.0) / 0.75;
-        s.draw(&mut batch, &atlas, end - 1.0, EndPortalFill::default());
+        s.draw_background(&mut batch, &atlas, EndPortalFill::default());
+        s.draw_contents(&mut batch, &atlas, end - 1.0);
         assert!(!s.finished(h));
         // Scrolling back never goes above the start.
         s.key(Key::Up, true);
-        s.draw(&mut batch, &atlas, end * 2.0, EndPortalFill::default());
+        s.draw_background(&mut batch, &atlas, EndPortalFill::default());
+        s.draw_contents(&mut batch, &atlas, end * 2.0);
         assert_eq!(s.scroll(), 0.0);
         s.key(Key::Up, false);
-        s.draw(&mut batch, &atlas, end + 1.0, EndPortalFill::default());
+        s.draw_background(&mut batch, &atlas, EndPortalFill::default());
+        s.draw_contents(&mut batch, &atlas, end + 1.0);
         assert!(s.finished(h));
     }
 }

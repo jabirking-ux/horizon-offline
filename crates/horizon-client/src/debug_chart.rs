@@ -48,6 +48,10 @@ impl SampleLogger {
     pub fn reset(&mut self) {
         self.samples.clear();
     }
+    /// The newest primary sample, if any, without copying the history.
+    pub fn latest(&self) -> Option<i64> {
+        self.samples.back().map(|sample| sample[0])
+    }
     fn get(&self, index: usize, dimension: usize) -> i64 {
         self.samples[index][dimension]
     }
@@ -468,7 +472,7 @@ fn gradient(
     }
 }
 /// `ARGB.srgbLerp`: each channel by `Mth.lerpInt`.
-fn srgb_lerp(alpha: f32, p0: u32, p1: u32) -> u32 {
+pub fn srgb_lerp(alpha: f32, p0: u32, p1: u32) -> u32 {
     let channel = |shift: u32| {
         let (a, b) = (((p0 >> shift) & 255) as i32, ((p1 >> shift) & 255) as i32);
         (a + (alpha * (b - a) as f32).floor() as i32) as u32

@@ -1,10 +1,14 @@
-//! Mod loaders for Java instances: Fabric, Forge, and Quilt. For each Minecraft version, a loader's
-//! metadata service lists its versions and serves a launcher profile: a version JSON that
-//! `inheritsFrom` the game's own, with the loader's main class and its libraries by Maven name and
-//! repository. The profile is kept in `versions/` beside the game's, as the official launcher keeps
-//! a loader's, and its libraries in `libraries/`, each checked against its sha1 (the profile's,
-//! else the one the repository publishes beside the file). `java_launch::resolve` merges the
-//! profile into the game's version.
+//! Mod loaders for Java instances: Fabric, Quilt, Forge and NeoForge. For each Minecraft version,
+//! Fabric's and Quilt's metadata services list their versions and serve a launcher profile: a
+//! version JSON that `inheritsFrom` the game's own, with the loader's main class and its libraries
+//! by Maven name and repository. Forge and NeoForge come as an installer whose processors patch the
+//! game's jar first ([`forge`]). The profile is kept in `versions/` beside the game's, as the
+//! official launcher keeps a loader's, and its libraries in `libraries/`, each checked against its
+//! sha1 (the profile's, else the one the repository publishes beside the file).
+//! `java_launch::resolve` merges the profile into the game's version.
+
+mod forge;
+mod forge_install;
 
 use crate::sources::{fetch_checked, sha1_file, write_file, Fetch};
 use serde::{Deserialize, Serialize};
@@ -18,16 +22,19 @@ pub enum Kind {
     Fabric,
     Quilt,
     Forge,
+    NeoForge,
 }
 
 impl Kind {
+    /// Every loader, in the order a picker shows them.
+    pub const ALL: [Kind; 4] = [Kind::Fabric, Kind::Quilt, Kind::Forge, Kind::NeoForge];
+
     pub fn parse(name: &str) -> Result<Kind, String> {
-        match name.trim().to_ascii_lowercase().as_str() {
-            "fabric" => Ok(Kind::Fabric),
-            "quilt" => Ok(Kind::Quilt),
-            "forge" => Ok(Kind::Forge),
-            _ => Err(format!("No mod loader {name:?}: fabric, forge or quilt.")),
-        }
+        let name = name.trim();
+        Kind::ALL
+            .into_iter()
+            .find(|k| k.id().eq_ignore_ascii_case(name))
+            .ok_or_else(|| format!("No mod loader {name:?}: fabric, quilt, forge or neoforge."))
     }
 
     pub fn name(self) -> &'static str {
@@ -35,35 +42,36 @@ impl Kind {
             Kind::Fabric => "Fabric",
             Kind::Quilt => "Quilt",
             Kind::Forge => "Forge",
+            Kind::NeoForge => "NeoForge",
         }
     }
 
-    /// As Modrinth and the instance's settings name it: `fabric`, `quilt`, `forge`.
+    /// As Modrinth and the instance's settings name it: `fabric`, `quilt`, `forge`, `neoforge`.
     pub fn id(self) -> &'static str {
         match self {
             Kind::Fabric => "fabric",
             Kind::Quilt => "quilt",
             Kind::Forge => "forge",
+            Kind::NeoForge => "neoforge",
         }
     }
 
-    /// Its metadata service.
+    /// Its metadata service (Fabric's and Quilt's).
     fn meta(self) -> &'static str {
         match self {
-            Kind::Fabric => "https://meta.fabricmc.net/v2",
             Kind::Quilt => "https://meta.quiltmc.org/v3",
-            Kind::Forge => "https://files.minecraftforge.net/net/minecraftforge/forge",
+            _ => "https://meta.fabricmc.net/v2",
         }
     }
 
-    /// The id its profile has: `fabric-loader-0.16.9-1.21.4` or `1.20.1-forge-47.3.0`.
+    /// The id its profile has: `fabric-loader-0.16.9-1.21.4`, `1.20.1-forge-47.3.0`,
+    /// `neoforge-21.1.77` (`1.20.1-neoforge-47.1.106` beside Forge's own 47.1 builds).
     pub fn profile_id(self, version: &str, minecraft: &str) -> String {
         match self {
             Kind::Forge => format!("{minecraft}-forge-{version}"),
-            _ => format!(
-                "{}-loader-{version}-{minecraft}",
-                self.name().to_lowercase()
-            ),
+            Kind::NeoForge if minecraft == "1.20.1" => format!("1.20.1-neoforge-{version}"),
+            Kind::NeoForge => format!("neoforge-{version}"),
+            _ => format!("{}-loader-{version}-{minecraft}", self.id()),
         }
     }
 }
@@ -119,111 +127,22 @@ pub fn parse_versions(text: &str) -> Result<Vec<Listed>, String> {
     Ok(listed)
 }
 
-/// Parses Forge's promotions_slim.json for a specific Minecraft version.
-pub fn parse_forge_promotions(text: &str, minecraft: &str) -> Result<Vec<Listed>, String> {
-    let data: Value = serde_json::from_str(text).map_err(|e| format!("Forge promotions: {e}"))?;
-    let promos = data
-        .get("promos")
-        .and_then(|p| p.as_object())
-        .ok_or("No promos object")?;
-
-    let rec_key = format!("{minecraft}-recommended");
-    let lat_key = format!("{minecraft}-latest");
-
-    let rec_ver = promos.get(&rec_key).and_then(|v| v.as_str());
-    let lat_ver = promos.get(&lat_key).and_then(|v| v.as_str());
-
-    let mut out = Vec::new();
-    if let Some(v) = rec_ver {
-        out.push(Listed {
-            version: v.to_string(),
-            stable: true,
-        });
-    }
-    if let Some(v) = lat_ver {
-        if Some(v) != rec_ver {
-            out.push(Listed {
-                version: v.to_string(),
-                stable: false,
-            });
-        }
-    }
-
-    if out.is_empty() {
-        let prefix = format!("{minecraft}-");
-        for (k, v) in promos {
-            if k.starts_with(&prefix) {
-                if let Some(ver) = v.as_str() {
-                    if !out.iter().any(|l: &Listed| l.version == ver) {
-                        out.push(Listed {
-                            version: ver.to_string(),
-                            stable: k.ends_with("recommended"),
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(out)
-}
-
-/// Fallback stable Forge versions for common Minecraft versions (for offline support).
-pub fn default_forge_versions(minecraft: &str) -> Vec<Listed> {
-    let stable = match minecraft {
-        "1.21.1" => Some("52.0.1"),
-        "1.20.4" => Some("49.1.0"),
-        "1.20.2" => Some("48.1.0"),
-        "1.20.1" => Some("47.3.0"),
-        "1.19.4" => Some("45.3.0"),
-        "1.19.2" => Some("43.4.0"),
-        "1.18.2" => Some("40.2.21"),
-        "1.16.5" => Some("36.2.42"),
-        "1.12.2" => Some("14.23.5.2860"),
-        _ => None,
-    };
-    match stable {
-        Some(v) => vec![Listed {
-            version: v.to_string(),
-            stable: true,
-        }],
-        None => Vec::new(),
-    }
-}
-
 /// `kind`'s versions for `minecraft`.
 pub fn versions(kind: Kind, minecraft: &str, fetch: Fetch) -> Result<Vec<Listed>, String> {
-    match kind {
-        Kind::Fabric | Kind::Quilt => {
+    let listed = match kind {
+        Kind::Forge | Kind::NeoForge => forge::versions(kind, minecraft, fetch)?,
+        _ => {
             let body = fetch(&format!("{}/versions/loader/{minecraft}", kind.meta()))?;
-            let listed = parse_versions(&String::from_utf8_lossy(&body))?;
-            if listed.is_empty() {
-                return Err(format!(
-                    "{} has no loader for Minecraft {minecraft}.",
-                    kind.name()
-                ));
-            }
-            Ok(listed)
+            parse_versions(&String::from_utf8_lossy(&body))?
         }
-        Kind::Forge => {
-            let promo_url =
-                "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json";
-            if let Ok(body) = fetch(promo_url) {
-                if let Ok(listed) =
-                    parse_forge_promotions(&String::from_utf8_lossy(&body), minecraft)
-                {
-                    if !listed.is_empty() {
-                        return Ok(listed);
-                    }
-                }
-            }
-            let defaults = default_forge_versions(minecraft);
-            if defaults.is_empty() {
-                return Err(format!("Forge has no loader for Minecraft {minecraft}."));
-            }
-            Ok(defaults)
-        }
+    };
+    if listed.is_empty() {
+        return Err(format!(
+            "{} has no loader for Minecraft {minecraft}.",
+            kind.name()
+        ));
     }
+    Ok(listed)
 }
 
 /// The loader `kind` names at `version` (none or `latest`: the newest stable one) for
@@ -273,56 +192,27 @@ pub fn maven_path(name: &str) -> Result<String, String> {
 
 /// Downloads `loader`'s profile for `minecraft` and its libraries into the game folder `dir`, and
 /// keeps the profile in `versions/` with each library's file named the way Mojang's are
-/// (`downloads.artifact`). Returns the profile's id.
+/// (`downloads.artifact`). Forge's and NeoForge's installers run on `java`, after the game itself
+/// is in `dir`. Returns the profile's id.
 pub fn install(
     loader: &Loader,
     minecraft: &str,
     dir: &Path,
+    java: &Path,
     fetch: Fetch,
     log: &dyn Fn(String),
 ) -> Result<String, String> {
-    if loader.kind == Kind::Forge {
-        let id = loader.kind.profile_id(&loader.version, minecraft);
-        let out = dir
-            .join("versions")
-            .join(crate::mojang::relative(&id)?)
-            .join(format!("{id}.json"));
-        if out.is_file() {
-            return Ok(id);
-        }
-        log(format!(
-            "Setting up Forge {} for Minecraft {minecraft}",
-            loader.version
-        ));
-        let profile = json!({
-            "id": id,
-            "inheritsFrom": minecraft,
-            "type": "release",
-            "mainClass": "net.minecraftforge.bootstrap.ForgeBootstrap",
-            "arguments": {
-                "game": [
-                    "--launchTarget", "forgeclient",
-                    "--fml.forgeVersion", loader.version,
-                    "--fml.mcVersion", minecraft
-                ],
-                "jvm": [
-                    format!("-Dforge.version={}", loader.version)
-                ]
-            },
-            "libraries": [
-                {
-                    "name": format!("net.minecraftforge:forge:{minecraft}-{}", loader.version),
-                    "url": "https://maven.minecraftforge.net/"
-                }
-            ]
-        });
-        write_file(
-            &out,
-            &serde_json::to_vec_pretty(&profile).map_err(|e| e.to_string())?,
-        )?;
-        return Ok(id);
+    if matches!(loader.kind, Kind::Forge | Kind::NeoForge) {
+        return forge_install::install(
+            loader.kind,
+            &loader.version,
+            minecraft,
+            dir,
+            java,
+            fetch,
+            log,
+        );
     }
-
     let name = loader.kind.name();
     let url = format!(
         "{}/versions/loader/{minecraft}/{}/profile/json",

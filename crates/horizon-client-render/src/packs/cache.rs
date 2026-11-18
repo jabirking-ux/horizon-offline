@@ -1,6 +1,7 @@
 //! Overlay reuse validated by source topology and filesystem stamps.
 //! Published output is an owned cache artifact; hits do not traverse its tree.
 use super::{Pack, Source, build_overlay_uncached};
+use crate::zip::Zip;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Read;
@@ -9,7 +10,11 @@ use std::{collections::BTreeSet, fs, io, path::Path, path::PathBuf};
 // Bump when overlay/merge semantics change. Markers are disposable cache data.
 // Version 4 mirrored every untouched directory file by file on Windows.
 // Version 3 could omit untouched vanilla directories on Windows (#1649, #1688).
-const VERSION: u32 = 5;
+// Version 5 read every vanilla file to stamp it on Windows.
+// Version 6 stamps vanilla's files by their metadata on Windows too.
+// Version 7 stacks blockstate files (every pack's definition, bottom first).
+// Version 8 left an atlas `single` source's renamed sprite without its texture file (#14485).
+const VERSION: u32 = 9;
 
 #[derive(Default, Serialize, Deserialize)]
 pub(super) struct Dependencies {
@@ -18,13 +23,16 @@ pub(super) struct Dependencies {
     failed: bool,
     #[serde(skip)]
     tracking: bool,
+    /// The vanilla root (absolute): its files are stamped without reading them.
+    #[serde(skip)]
+    vanilla: PathBuf,
 }
 impl Dependencies {
     fn record(&mut self, path: &Path, directory: bool) {
         if !self.tracking {
             return;
         }
-        match dependency_signature(path, directory) {
+        match dependency_signature(path, directory, &self.vanilla) {
             Ok(signature) => self.entries.push((path.into(), directory, signature)),
             Err(_) => self.failed = true,
         }
@@ -38,7 +46,7 @@ impl Dependencies {
     fn valid(&self) -> bool {
         !self.failed
             && self.entries.iter().all(|(path, directory, signature)| {
-                dependency_signature(path, *directory).is_ok_and(|s| s == *signature)
+                dependency_signature(path, *directory, &self.vanilla).is_ok_and(|s| s == *signature)
             })
     }
 }
@@ -72,13 +80,34 @@ fn content(hash: &mut Sha256, path: &Path) -> io::Result<()> {
     }
     Ok(())
 }
-fn stamp(hash: &mut Sha256, path: &Path) -> io::Result<()> {
+/// The largest zip hashed by its bytes: vanilla's limit on a server pack.
+const WHOLE_ZIP: u64 = 250 << 20;
+/// A zip up to `whole` by its bytes, which also catches an edit its checksums
+/// don't show (a pack may leave them empty, nothing reads them). A larger one
+/// would take minutes on every check, so by its stamp and its directory: what a
+/// local pack changes when it is replaced, and the directory reads in a moment.
+fn zip_content(hash: &mut Sha256, path: &Path, whole: u64) -> io::Result<()> {
+    let meta = fs::metadata(path)?;
+    match Zip::open(path) {
+        Ok(zip) if meta.len() > whole => {
+            hash.update(meta.len().to_le_bytes());
+            field(hash, format!("{:?}", meta.modified()?).as_bytes());
+            hash.update(zip.directory());
+            Ok(())
+        }
+        _ => content(hash, path),
+    }
+}
+/// `path`'s stamp; `read` lets platforms without a change timestamp hash a file's bytes.
+fn stamp(hash: &mut Sha256, path: &Path, read: bool) -> io::Result<()> {
     let meta = fs::metadata(path)?;
     hash.update(meta.len().to_le_bytes());
     field(hash, format!("{:?}", meta.modified()?).as_bytes());
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        // The change time stands in for the bytes here.
+        let _ = read;
         hash.update(meta.dev().to_le_bytes());
         hash.update(meta.ino().to_le_bytes());
         hash.update(meta.ctime().to_le_bytes());
@@ -87,8 +116,11 @@ fn stamp(hash: &mut Sha256, path: &Path) -> io::Result<()> {
     #[cfg(not(unix))]
     {
         // Portable metadata lacks a change timestamp. Preserve content-based
-        // validation for materialized files on those platforms.
-        if meta.is_file() {
+        // validation for the packs' materialized files on those platforms;
+        // vanilla's (the launcher's, tens of thousands) keep to the size and
+        // the write and creation times: reading each costs minutes on Windows,
+        // where every open is scanned by the antivirus.
+        if read && meta.is_file() {
             return content(hash, path);
         }
         if let Ok(created) = meta.created() {
@@ -104,17 +136,18 @@ fn entries(path: &Path) -> io::Result<Vec<PathBuf>> {
     entries.sort();
     Ok(entries)
 }
-fn dependency_signature(path: &Path, directory: bool) -> io::Result<String> {
+fn dependency_signature(path: &Path, directory: bool, vanilla: &Path) -> io::Result<String> {
     let mut hash = Sha256::new();
+    let read = !(path.starts_with(vanilla) || absolute(path).is_ok_and(|p| p.starts_with(vanilla)));
     match fs::metadata(path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => field(&mut hash, b"missing"),
         Err(e) => return Err(e),
         Ok(meta) if directory && meta.is_dir() => {
             field(&mut hash, b"directory");
-            stamp(&mut hash, path)?;
+            stamp(&mut hash, path, read)?;
         }
         Ok(_) if directory => field(&mut hash, b"not-directory"),
-        Ok(_) => stamp(&mut hash, path)?,
+        Ok(_) => stamp(&mut hash, path, read)?,
     }
     Ok(finish(hash))
 }
@@ -190,7 +223,7 @@ fn tree_inner(
             if pack.is_none() {
                 return content(hash, path);
             }
-            stamp(hash, path)?;
+            stamp(hash, path, true)?;
         }
     }
     Ok(())
@@ -230,6 +263,12 @@ fn pack_signature(packs: &[Pack]) -> io::Result<String> {
         field(&mut hash, format!("{:?}", pack.overlays).as_bytes());
         field(&mut hash, format!("{:?}", pack.filter).as_bytes());
         match &pack.source {
+            Source::Opened(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "open resource layers do not have a persistent filesystem cache key",
+                ));
+            }
             Source::Dir(path) => {
                 field(&mut hash, absolute(path)?.as_os_str().as_encoded_bytes());
                 tree(&mut hash, path, Some(pack))?;
@@ -238,8 +277,8 @@ fn pack_signature(packs: &[Pack]) -> io::Result<String> {
                 field(&mut hash, absolute(path)?.as_os_str().as_encoded_bytes());
                 // By its bytes, not its stamp: a server pack found in the download cache is
                 // marked used on every join (`HttpUtil.updateModificationTime`), and a new
-                // time rebuilt the whole overlay each time. One file reads in a moment.
-                content(&mut hash, path)?;
+                // time rebuilt the whole overlay each time.
+                zip_content(&mut hash, path, WHOLE_ZIP)?;
             }
         }
     }
@@ -265,6 +304,107 @@ fn lock_path(out: &Path) -> PathBuf {
     marker_path(out).with_extension("lock")
 }
 
+/// The overlays [`prune`] keeps in a cache folder, newest use first. Each holds a whole unpacked
+/// copy of its zip packs, and every server pack, and every new version of one, makes another.
+pub(super) const KEEP: usize = 8;
+
+/// The file whose shared lock says a process uses `out`, and whose time is its last use.
+fn use_path(out: &Path) -> PathBuf {
+    marker_path(out).with_extension("use")
+}
+
+/// Marks `out` as used by this process until it exits ([`prune`] never deletes it), and as used
+/// now. The lock is taken before the overlay is built or read, so a prune in another process
+/// that took the folder first finishes deleting it before this one rebuilds it.
+pub(super) fn hold(out: &Path) -> io::Result<()> {
+    use std::sync::{Mutex, PoisonError};
+    static HELD: Mutex<Vec<(PathBuf, fs::File)>> = Mutex::new(Vec::new());
+    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    let mut held = HELD.lock().unwrap_or_else(PoisonError::into_inner);
+    let at = match held.iter().position(|(path, _)| path == out) {
+        Some(at) => at,
+        None => {
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(use_path(out))?;
+            file.lock_shared()?;
+            held.push((out.into(), file));
+            held.len() - 1
+        }
+    };
+    // Only the order of the prune depends on it: a filesystem without the time loses nothing.
+    let _ = held[at].1.set_modified(std::time::SystemTime::now());
+    Ok(())
+}
+
+/// Deletes the overlays in `cache` past the [`KEEP`] most recently used, skipping any that a
+/// process holds ([`hold`]) or builds. Only `<16 hex digits>` folders are overlays.
+pub(super) fn prune(cache: &Path) {
+    let Ok(entries) = fs::read_dir(cache) else {
+        return;
+    };
+    let mut overlays: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.len() == 16 && n.bytes().all(|b| b.is_ascii_hexdigit()))
+                && p.is_dir()
+        })
+        .map(|p| {
+            // An overlay built before use files existed goes by its marker or its folder.
+            let used = [use_path(&p), marker_path(&p), p.clone()]
+                .iter()
+                .find_map(|f| fs::metadata(f).and_then(|m| m.modified()).ok())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (used, p)
+        })
+        .collect();
+    overlays.sort_by_key(|(used, _)| std::cmp::Reverse(*used));
+    for (_, old) in overlays.into_iter().skip(KEEP) {
+        if let Err(e) = remove_unused(&old) {
+            log::warn!(
+                "Horizon: couldn't remove the old pack overlay {}: {e}",
+                old.display()
+            );
+        }
+    }
+}
+
+/// Deletes the overlay `out` unless a process builds or uses it. The lock files stay: deleting
+/// them would let two processes lock different files of the same name.
+fn remove_unused(out: &Path) -> io::Result<()> {
+    let open = |path: PathBuf| {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+    };
+    let building = open(lock_path(out))?;
+    let using = open(use_path(out))?;
+    for lock in [&building, &using] {
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => return Ok(()),
+            Err(fs::TryLockError::Error(e)) => return Err(e),
+        }
+    }
+    // The marker first: a folder half deleted is never taken for a built one.
+    match fs::remove_file(marker_path(out)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    fs::remove_dir_all(out)
+}
+
 pub(super) fn build(vanilla: &Path, packs: &[Pack], out: &Path) -> io::Result<()> {
     if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
@@ -283,11 +423,14 @@ pub(super) fn build(vanilla: &Path, packs: &[Pack], out: &Path) -> io::Result<()
     let signature = pack_signature(packs);
     if let Ok(signature) = &signature
         && let Ok(bytes) = fs::read(&marker_path)
-        && let Ok(marker) = serde_json::from_slice::<Marker>(&bytes)
+        && let Ok(mut marker) = serde_json::from_slice::<Marker>(&bytes)
         && marker.version == VERSION
         && marker.vanilla == vanilla_key
         && marker.packs == *signature
-        && marker.dependencies.valid()
+        && {
+            marker.dependencies.vanilla = vanilla_key.clone();
+            marker.dependencies.valid()
+        }
         && out.is_dir()
     {
         return Ok(());
@@ -300,6 +443,7 @@ pub(super) fn build(vanilla: &Path, packs: &[Pack], out: &Path) -> io::Result<()
     }
     let mut dependencies = Dependencies {
         tracking: signature.is_ok(),
+        vanilla: vanilla_key.clone(),
         ..Dependencies::default()
     };
     build_overlay_uncached(vanilla, packs, out, &mut dependencies)?;
@@ -331,6 +475,77 @@ mod tests {
     use super::*;
     use crate::{packs, text::Text};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn prune_keeps_the_most_recently_used_overlays_and_those_in_use() {
+        let f = Fixture::new();
+        let cache = f.0.join("cache");
+        let now = std::time::SystemTime::now();
+        // KEEP + 4 overlays, overlay 0 used last; one more not an overlay.
+        let overlays: Vec<PathBuf> = (0..KEEP + 4)
+            .map(|i| {
+                let out = cache.join(format!("{i:016x}"));
+                f.write(&format!("cache/{i:016x}/assets/a.png"), b"x");
+                f.write(&format!("cache/{i:016x}.overlay-cache.json"), b"{}");
+                let used = fs::File::create(use_path(&out)).unwrap();
+                used.set_modified(now - std::time::Duration::from_secs(60 * i as u64))
+                    .unwrap();
+                out
+            })
+            .collect();
+        f.write("cache/notes/keep.txt", b"x");
+        // Another process uses the oldest, and builds the second oldest.
+        let using = fs::File::open(use_path(&overlays[KEEP + 3])).unwrap();
+        using.lock_shared().unwrap();
+        let building = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path(&overlays[KEEP + 2]))
+            .unwrap();
+        building.lock().unwrap();
+        prune(&cache);
+        let kept: Vec<bool> = overlays.iter().map(|o| o.is_dir()).collect();
+        let mut expected = vec![true; KEEP];
+        expected.extend([false, false, true, true]);
+        assert_eq!(kept, expected);
+        assert!(
+            !marker_path(&overlays[KEEP]).exists(),
+            "never reused half deleted"
+        );
+        assert!(cache.join("notes/keep.txt").exists());
+        // Released, they go at the next prune.
+        drop((using, building));
+        prune(&cache);
+        assert_eq!(
+            overlays.iter().filter(|o| o.is_dir()).count(),
+            KEEP,
+            "only the most recent stay"
+        );
+        assert!(overlays[..KEEP].iter().all(|o| o.is_dir()));
+    }
+
+    #[test]
+    fn an_overlay_held_by_this_process_is_never_pruned() {
+        let f = Fixture::new();
+        let cache = f.0.join("cache");
+        let held = cache.join("00000000000000ff");
+        f.write("cache/00000000000000ff/assets/a.png", b"x");
+        hold(&held).unwrap();
+        // Older than KEEP others, and still in use.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(use_path(&held))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        for i in 0..KEEP {
+            f.write(&format!("cache/{i:016x}/assets/a.png"), b"x");
+        }
+        prune(&cache);
+        assert!(held.is_dir());
+    }
 
     struct Fixture(PathBuf);
     impl Fixture {
@@ -617,6 +832,36 @@ mod tests {
     }
 
     #[test]
+    fn a_large_zip_is_stamped_by_its_directory_and_time() {
+        let f = Fixture::new();
+        let path = f.0.join("large.zip");
+        let at = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1 << 30);
+        let write = |name: &str, first: u8, modified| {
+            let mut body = vec![0u8; 1 << 18];
+            body[0] = first;
+            fs::write(&path, archive(&[(name, body)], false)).unwrap();
+            let file = fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(modified).unwrap();
+        };
+        let signature = |whole| {
+            let mut hash = Sha256::new();
+            zip_content(&mut hash, &path, whole).unwrap();
+            finish(hash)
+        };
+        write("a", 0, at);
+        let (bytes, directory) = (signature(u64::MAX), signature(0));
+        // Above the limit the entries' bytes go unread; at or under it they count.
+        write("a", 1, at);
+        assert_eq!(signature(0), directory);
+        assert_ne!(signature(u64::MAX), bytes);
+        write("b", 0, at);
+        assert_ne!(signature(0), directory);
+        write("a", 0, at + std::time::Duration::from_secs(60));
+        assert_ne!(signature(0), directory);
+        assert_eq!(signature(u64::MAX), bytes);
+    }
+
+    #[test]
     fn zip_content_and_failed_build_invalidate() {
         let f = Fixture::new();
         f.write("vanilla/facts.json", b"[]");
@@ -642,15 +887,16 @@ mod tests {
         f.write("pack.zip", &archive(&files(b"bbb"), false));
         f.rebuild_matches(std::slice::from_ref(&pack));
         assert_eq!(fs::read(f.0.join("cached").join(name)).unwrap(), b"bbb");
-        // The ZIP opens and enumerates, then its unsupported method fails after
-        // mirror has created directories. No reusable marker survives.
+        // A central directory whose second name runs past the archive fails
+        // the build (an unreadable entry alone only costs that file). No
+        // reusable marker survives.
         let mut broken = archive(&files(b"ccc"), false);
         let central = broken
             .windows(4)
             .position(|s| s == [0x50, 0x4b, 0x01, 0x02])
             .unwrap();
         let second = central + 46 + "pack.mcmeta".len();
-        broken[second + 10..second + 12].copy_from_slice(&99u16.to_le_bytes());
+        broken[second + 28..second + 30].copy_from_slice(&u16::MAX.to_le_bytes());
         f.write("pack.zip", &broken);
         let out = f.0.join("cached");
         assert!(

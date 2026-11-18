@@ -1,7 +1,7 @@
 //! `Stopwatches`: the named wall-clock timers of `/stopwatch`, saved in
 //! `data/minecraft/stopwatches.dat` as the elapsed milliseconds of each.
 use crate::save;
-use horizon_world::nbt::{Compound, JavaString, Tag};
+use horizon_core::nbt::{Compound, JavaString, Tag};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -67,13 +67,15 @@ impl Stopwatches {
             .iter()
             .map(|(k, w)| (k.as_str().into(), Tag::Long(w.elapsed_ms(now))))
             .collect();
-        let _ = save::write_dat(
+        if let Err(e) = save::write_dat(
             &file(root),
             Tag::compound([
                 ("data", Tag::compound([("stopwatches", Tag::Compound(map))])),
                 ("DataVersion", Tag::Int(horizon_world::DATA_VERSION)),
             ]),
-        );
+        ) {
+            log::warn!("Horizon: the stopwatches are not saved: {e}");
+        }
     }
     pub fn ids(&self) -> Vec<String> {
         self.watches.keys().cloned().collect()

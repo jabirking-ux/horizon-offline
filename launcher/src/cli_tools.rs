@@ -7,17 +7,25 @@ use clap::{ArgAction, Command};
 use serde_json::{json, Map, Value};
 
 /// CLI commands that are not generated tools: the MCP server itself; No AI, the player's switch
-/// and never an agent's; trusting native mods' code, the player's decision too; and the ones
-/// mcp.rs runs in the session.
+/// and never an agent's; trusting native mods' code, the player's decision too; the ones
+/// mcp.rs runs in the session; and the game's session handoff, a file holding a token.
 const NOT_TOOLS: &[&str] = &[
     "mcp",
+    "completions",
     "agent-config",
     "no-ai",
     "native-build",
+    // It installs a program nothing signed: the player's decision.
+    "import-build",
+    "developer-install",
+    // They install native code nobody reviewed, and say it first: the player's decision.
+    "mods add-github",
+    "mods update-github",
     "play",
     "server",
     "account sign-in",
     "account list",
+    "account session",
 ];
 
 /// Commands that delete the player's things: their tools need `confirm: true`.
@@ -254,6 +262,7 @@ fn session_tool(words: &str) -> &'static str {
         "account list" => "`account_list`",
         "mcp" => "none: this command is the MCP server",
         "agent-config" => "none: it prints how to connect a client to `mcp`",
+        "account session" => "none: the game's own session handoff",
         _ => "none: the player's switch",
     }
 }
@@ -269,6 +278,7 @@ arguments are the command's, in snake_case. A tool runs the command with `--json
 The tools that change the player's things for good need `confirm: true`. \
 The tools that send something or reach other people say \"only when the player asks\". \
 The game's own tools, `game_*`, are in [horizon-ctl-commands.md](horizon-ctl-commands.md). \
+For unsigned developer installations only, `HORIZON_LAUNCHER_DEVELOPER_OFFLINE=1` enables account-free Play. Only the exact value `1` enables it. The installed base must have persisted developer provenance, and the selected game must advertise `--developer-single-player` through `--launch-api`; older games must be rebuilt and reinstalled. Signed releases, Nightlies and their native descendants keep the account check. This mode supplies no session, blocks normal external connections and LAN hosting, and preserves managed launch leases, instance settings and unsigned labels. It is not a sandbox for native mods. If direct execution reports unregistered cache directories, use Horizon Launcher Play from the same launcher data directory with the intended instance and installed version (`horizon-launcher play --instance <instance> --version <tag>`).\n\n\
 With No AI on, `mcp` and `agent-config` are hidden and refuse; every other command stays. See [agent-control.md](agent-control.md#no-ai).\n\n",
     );
     let mut rows = Vec::new();
@@ -315,6 +325,9 @@ With No AI on, `mcp` and `agent-config` are hidden and refuse; every other comma
         if !args.is_empty() {
             out += "\n";
         }
+        if let Some(after_help) = cmd.get_after_help() {
+            out += &format!("{after_help}\n\n");
+        }
         let mcp = if generated.contains(&words) {
             let path: Vec<String> = words.split(' ').map(str::to_owned).collect();
             let mut text = format!("`{}`", tool_name(&path));
@@ -350,7 +363,10 @@ fn collect(cmd: &Command, path: &mut Vec<String>, out: &mut Vec<(String, Command
 
 /// Whether an argument is part of a tool (not --help, --version or the global --json).
 fn shown(arg: &clap::Arg) -> bool {
-    !arg.is_hide_set() && !matches!(arg.get_id().as_str(), "help" | "version" | "json")
+    // Only clap's built-in `--version` flag is left out: a command's own `--version <tag>` argument is shown.
+    !arg.is_hide_set()
+        && !matches!(arg.get_id().as_str(), "help" | "json")
+        && !matches!(arg.get_action(), clap::ArgAction::Version)
 }
 
 /// Whether an argument takes several values (a list).
@@ -392,7 +408,14 @@ mod tests {
         ] {
             assert!(names.iter().any(|n| n == want), "{want} missing: {names:?}");
         }
-        for not in ["mcp", "no_ai", "play", "server", "account_sign_in"] {
+        for not in [
+            "mcp",
+            "no_ai",
+            "play",
+            "server",
+            "account_sign_in",
+            "account_session",
+        ] {
             assert!(!names.iter().any(|n| n == not), "{not}");
         }
     }

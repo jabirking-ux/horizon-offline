@@ -51,26 +51,8 @@ fn versions_name_the_stable_ones() {
         "quilt-loader-0.19.2-1.21.4"
     );
     assert_eq!(Kind::parse(" Fabric ").unwrap(), Kind::Fabric);
-    assert_eq!(Kind::parse("forge").unwrap(), Kind::Forge);
-    assert!(Kind::parse("neoforge").is_err());
-}
-
-#[test]
-fn forge_promotions_and_defaults() {
-    let promos = r#"{"promos": {"1.20.1-recommended": "47.3.0", "1.20.1-latest": "47.3.5"}}"#;
-    let listed = parse_forge_promotions(promos, "1.20.1").unwrap();
-    assert_eq!(listed.len(), 2);
-    assert_eq!(listed[0].version, "47.3.0");
-    assert!(listed[0].stable);
-    assert_eq!(listed[1].version, "47.3.5");
-    assert!(!listed[1].stable);
-
-    let defs = default_forge_versions("1.20.1");
-    assert_eq!(defs[0].version, "47.3.0");
-    assert_eq!(
-        Kind::Forge.profile_id("47.3.0", "1.20.1"),
-        "1.20.1-forge-47.3.0"
-    );
+    assert_eq!(Kind::parse("NeoForge").unwrap(), Kind::NeoForge);
+    assert!(Kind::parse("liteloader").is_err());
 }
 
 #[test]
@@ -123,7 +105,7 @@ fn a_profile_comes_with_its_libraries_checked() {
     };
     let install_with = |served: &HashMap<String, Vec<u8>>, minecraft: &str| {
         let fetch = |url: &str| served.get(url).cloned().ok_or(format!("404 {url}"));
-        install(&loader, minecraft, &dir, &fetch, &|_| {})
+        install(&loader, minecraft, &dir, Path::new("java"), &fetch, &|_| {})
     };
     let id = install_with(&served, "1.21.4").unwrap();
     assert_eq!(id, Kind::Fabric.profile_id("0.16.9", "1.21.4"));
@@ -162,9 +144,14 @@ fn the_real_loaders_install() {
         let dir =
             std::env::temp_dir().join(format!("horizon-loaders-{kind}-{}", std::process::id()));
         let loader = choose(kind, "1.21.4", None).unwrap();
-        let id = install(&loader, "1.21.4", &dir, &crate::backend::get_bytes, &|l| {
-            eprintln!("{l}")
-        })
+        let id = install(
+            &loader,
+            "1.21.4",
+            &dir,
+            Path::new("java"),
+            &crate::backend::get_bytes,
+            &|l| eprintln!("{l}"),
+        )
         .unwrap();
         assert_eq!(id, loader.kind.profile_id(&loader.version, "1.21.4"));
         let kept: Value = serde_json::from_slice(

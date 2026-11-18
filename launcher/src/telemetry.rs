@@ -12,26 +12,33 @@ use horizon_telemetry::{outbox, Choices, Consent, Item, Kind, Payload, Source};
 
 use crate::{account::Accounts, backend};
 
-/// Each switch: its name, and in plain words exactly what it sends.
-pub const SWITCHES: [(Kind, &str, &str); 4] = [
+/// How the data question and Settings open: the switches are off, the ping is on.
+pub const OPENING: &str = "These reports are off until you turn them on. The \"I'm playing\" ping is on until you turn it off.";
+
+/// Each switch: its name, what it is for in one plain sentence, and exactly what it sends.
+pub const SWITCHES: [(Kind, &str, &str, &str); 4] = [
     (
         Kind::Perf,
         "Performance statistics",
+        "How smoothly Horizon runs on your computer, so slowdowns can be found and fixed.",
         "After each session: frame-time percentiles and a 14-bucket histogram, tick times, peak memory and startup times, with your machine (OS, CPU and its cores and clocks, memory size, GPU, its memory and driver, drive type, screen size and refresh rate, laptop or desktop, on battery or not) and the settings that change performance.",
     ),
     (
         Kind::Crash,
         "Crash reports",
+        "A short report when the game crashes, so the crash can be fixed.",
         "When the game crashes: the error, where in Horizon's code it happened, your graphics adapter and settings. No log, no world or server, no user name in paths.",
     ),
     (
         Kind::Bug,
         "Bug reports",
+        "Only the bug reports you write and send yourself.",
         "Only the reports you write and send yourself, with the game's log if you add it after reading it.",
     ),
     (
         Kind::Benchmark,
         "Benchmark uploads",
+        "Your benchmark results, for the community results page.",
         "The results of benchmarks you run, for the community results on playhorizon.dev.",
     ),
 ];
@@ -39,18 +46,36 @@ pub const SWITCHES: [(Kind, &str, &str); 4] = [
 /// Never sent, whatever the switches say.
 pub const NEVER: &str = "Never sent: your account name or UUID, world names, server addresses, chat, or your IP address. Each report is dated to the day, under a random install ID you can delete.";
 
-/// The anonymous "I'm playing" ping the game sends whatever the switches say (Ludovic's
-/// decision, 2026-10-22: count everyone, and tell them). Shown on the first-run question, in
-/// Settings, and once on the Play page to players who answered before it existed.
+/// The anonymous "I'm playing" ping the game sends (Ludovic's decision, 2026-10-22: count
+/// everyone, and tell them). On by default as upstream; this launcher also lets the player turn
+/// it off (`Settings::ping_off`), then starts the game with `HORIZON_NO_HEARTBEAT`. Shown on the
+/// first-run welcome and question, in Settings, and once on the Play page to players who
+/// answered before it existed.
 pub const PING_NAME: &str = "\"I'm playing\" ping";
-pub const PING: &str = "While you play, the game sends an anonymous \"I'm playing\" ping once a minute, so the launcher can show how many people play Horizon right now. It holds: a random number made when the game starts and forgotten when it closes, the Horizon version, your OS (Linux, macOS or Windows), and whether you have a world open to LAN or friends. It doesn't hold: your account, your install ID, world or server names, or anything you do in the game, and the server doesn't keep your IP address. It is sent whatever the switches say.";
+pub const PING_SUMMARY: &str = "Tells Horizon, anonymously, that you're playing, so the launcher can show how many people play right now.";
+pub const PING: &str = "While you play, the game sends an anonymous \"I'm playing\" ping once a minute, so the launcher can show how many people play Horizon right now. It holds: a random number made when the game starts and forgotten when it closes, the Horizon version, your OS (Linux, macOS or Windows), and whether you have a world open to LAN or friends. It doesn't hold: your account, your install ID, world or server names, or anything you do in the game, and the server doesn't keep your IP address. It is on unless you turn it off.";
 
-/// How many play Horizon now (rounded), if the server says.
+/// The game sends the [`PING`] unless the player turned it off (`Settings::ping_off`).
+pub fn ping_only_if_allowed(cmd: &mut std::process::Command, allowed: bool) {
+    if !allowed {
+        cmd.env("HORIZON_NO_HEARTBEAT", "1");
+    }
+}
+
+/// How many play Horizon now (exact), if the server says.
 pub fn playing_now() -> Option<u64> {
     let endpoint = horizon_telemetry::endpoint()?;
     horizon_telemetry::live::fetch(&endpoint)
         .ok()
         .map(|count| count.playing)
+}
+
+/// The page with the count over time and its peaks, on the website `links.json` names; None when
+/// it names none.
+pub fn stats_url(website: &str) -> Option<String> {
+    let site = website.trim().trim_end_matches('/');
+    site.starts_with("https://")
+        .then(|| format!("{site}/stats"))
 }
 
 /// Sends [`playing_now`] to the window as `Msg::Playing` now and every minute, on its own
@@ -61,6 +86,61 @@ pub fn watch_playing(tx: std::sync::mpsc::Sender<backend::Msg>) {
     }
     std::thread::spawn(move || {
         while tx.send(backend::Msg::Playing(playing_now())).is_ok() {
+            std::thread::sleep(horizon_telemetry::live::INTERVAL);
+        }
+    });
+}
+
+/// The official server's address from links.json once read (`set_official_server`; empty: none),
+/// the built-in one until then.
+static OFFICIAL_SERVER: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// The official server [`watch_official`] asks from now on: `Links::official_server`.
+pub fn set_official_server(address: &str) {
+    *OFFICIAL_SERVER.write().unwrap_or_else(|e| e.into_inner()) = Some(address.trim().to_owned());
+}
+
+fn official_server() -> String {
+    OFFICIAL_SERVER
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_else(|| crate::server_list::OFFICIAL_ADDRESS.to_owned())
+}
+
+/// A server's players by its server-list status ping, as the game's Multiplayer list sends it
+/// (through the address's SRV record), with a 3-second timeout. None when it doesn't answer.
+pub fn server_players(address: &str) -> Option<horizon_telemetry::server_status::Players> {
+    let (host, port) = horizon_telemetry::server_status::split_address(address)?;
+    let (host, port) = horizon_platform::protocol::server_redirect(&host, port);
+    horizon_telemetry::server_status::players_at(
+        address,
+        (&host, port),
+        std::time::Duration::from_secs(3),
+    )
+    .ok()
+}
+
+/// How many play on the official server now ([`server_players`]). None when it doesn't answer
+/// or there is no official server.
+pub fn official_players(address: &str) -> Option<u64> {
+    server_players(address).map(|players| players.online)
+}
+
+/// Sends [`official_players`] to the window as `Msg::OfficialPlayers` now and every minute, on
+/// its own thread. Nothing when `HORIZON_TELEMETRY_URL=off` (tests and automated runs) turns the
+/// live count off too.
+pub fn watch_official(tx: std::sync::mpsc::Sender<backend::Msg>) {
+    if horizon_telemetry::endpoint().is_none() {
+        return;
+    }
+    std::thread::spawn(move || {
+        while tx
+            .send(backend::Msg::OfficialPlayers(official_players(
+                &official_server(),
+            )))
+            .is_ok()
+        {
             std::thread::sleep(horizon_telemetry::live::INTERVAL);
         }
     });
@@ -348,6 +428,37 @@ pub fn set(kinds: &[Kind], on: bool) -> Result<Consent, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The official server's count through its SRV record, from the live server (network):
+    /// `cargo test --lib official_count -- --ignored`. Its port 25565 is another server.
+    #[test]
+    #[ignore = "asks the live official server"]
+    fn official_count_follows_the_srv_record() {
+        let (host, port) = horizon_platform::protocol::server_redirect(
+            crate::server_list::OFFICIAL_ADDRESS,
+            25565,
+        );
+        assert_eq!(
+            (host.trim_end_matches('.'), port),
+            ("play.playhorizon.dev", 24454)
+        );
+        assert!(official_players(crate::server_list::OFFICIAL_ADDRESS).is_some());
+        assert_eq!(official_players(""), None);
+    }
+
+    #[test]
+    fn the_stats_page_is_on_the_website() {
+        assert_eq!(
+            stats_url("https://playhorizon.dev").as_deref(),
+            Some("https://playhorizon.dev/stats")
+        );
+        assert_eq!(
+            stats_url("https://example.org/horizon/").as_deref(),
+            Some("https://example.org/horizon/stats")
+        );
+        assert_eq!(stats_url(""), None);
+        assert_eq!(stats_url("javascript:alert(1)"), None);
+    }
 
     #[test]
     fn kinds_are_named_in_plain_words_or_short() {

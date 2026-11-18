@@ -6,6 +6,7 @@ generated files stay in .local/. Also the small helpers the harnesses share
 
 import argparse
 import atexit
+import contextlib
 from collections import Counter
 import hashlib
 import json
@@ -19,6 +20,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import uuid
 import zipfile
@@ -55,6 +57,14 @@ def cargo_target():
     return ROOT / os.environ.get("CARGO_TARGET_DIR", "target")
 
 
+def binary(folder, name):
+    """A built program in folder: name.exe on Windows (Cargo's name there), name elsewhere."""
+    path = Path(folder) / name
+    if os.name == "nt" and not path.exists():
+        return path.with_name(name + ".exe")
+    return path
+
+
 _SCRATCH_DIRS = []
 
 
@@ -62,6 +72,27 @@ def _scratch_dir(prefix):
     path = tempfile.mkdtemp(prefix=prefix)
     _SCRATCH_DIRS.append(path)
     return path
+
+
+@contextlib.contextmanager
+def temp_folder(prefix):
+    """`tempfile.TemporaryDirectory` for a folder a server ran in: on Windows the folder can stay locked for a
+    second or two after the server exits, so removing it is retried instead of failing a run that passed."""
+    path = tempfile.mkdtemp(prefix=prefix)
+    try:
+        yield path
+    finally:
+        for attempt in range(10):
+            try:
+                shutil.rmtree(path)
+                break
+            except FileNotFoundError:
+                break
+            except OSError as error:
+                if attempt == 9:
+                    print(f"Could not remove scratch folder {path}: {error}", file=sys.stderr)
+                else:
+                    time.sleep(0.5)
 
 
 @atexit.register
@@ -72,7 +103,7 @@ def _remove_scratch_dirs():
 
 def game_env(base=None, **extra):
     """The environment for every run of the game, the launcher or horizon-ctl from a tool or a harness: no audio,
-    no Discord presence, and fresh scratch folders for the game's home (logs, saves, options), the launcher's home and the XDG folders,
+    fresh scratch folders for the game's home (logs, saves, options), the launcher's home and the XDG folders,
     so a run never writes into a real player's folders (the game falls back to them when HORIZON_HOME is unset).
     A folder the caller already has in `base` (default os.environ) or passes in `extra` is kept. The scratch folders
     are removed when this process exits."""
@@ -80,14 +111,27 @@ def game_env(base=None, **extra):
     env.update({key: str(value) for key, value in extra.items()})
     env["HORIZON_NO_AUDIO"] = "1"
     env["HORIZON_LAUNCHER_NO_SELF_UPDATE"] = "1"
-    # Never a real Discord's Rich Presence; tools/discord_presence_e2e.py points the game at a fake one.
-    if not env.get("HORIZON_DISCORD_IPC_DIR"):
-        env["HORIZON_NO_DISCORD"] = "1"
+    # Local fixtures use real TCP, but need no inbound access from other machines.
+    # Network/discovery suites can explicitly set HORIZON_TEST_LOOPBACK=0.
+    env.setdefault("HORIZON_TEST_LOOPBACK", "1")
     for key, prefix in (("HORIZON_HOME", "horizon-home-"), ("HORIZON_LAUNCHER_HOME", "horizon-launcher-home-"),
                         ("XDG_DATA_HOME", "horizon-xdg-data-"), ("XDG_CONFIG_HOME", "horizon-xdg-config-")):
         if not env.get(key):
             env[key] = _scratch_dir(prefix)
     return env
+
+
+def link_dir(target, link):
+    """Make `link` a link to the folder `target`: a symbolic link, or on Windows, where creating one needs
+    Developer Mode or an administrator (WinError 1314), a directory junction, which needs neither.
+    shutil.rmtree removes a junction without touching what it points to, as it does a symbolic link."""
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except OSError as error:
+        if sys.platform != "win32" or getattr(error, "winerror", None) != 1314:
+            raise
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(Path(target).resolve())],
+                       check=True, capture_output=True)
 
 
 def write_json(path, data):
@@ -100,11 +144,36 @@ def digest(path, algorithm):
         return hashlib.file_digest(stream, algorithm).hexdigest()
 
 
+_PORT_LOCKS = []  # open lock files, held until this process exits
+
+
 def free_port():
-    """A free local TCP port, for a server a harness starts."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    """A free local TCP port, for a server a harness starts.
+
+    The OS hands out a port when we bind to 0, but we close it before the server binds it, and a harness running
+    beside this one (another worktree, the parallel job queue) can be handed the same number in that gap. So each port
+    is also claimed with a lock file in the temp dir, held until this process exits; a port another harness has
+    claimed is skipped. Windows has no flock (nor os.getuid): there the port is the OS's answer alone, as before."""
+    if sys.platform == "win32":
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+    import fcntl
+    locks = Path(tempfile.gettempdir()) / f"horizon-harness-ports-{os.getuid()}"
+    locks.mkdir(exist_ok=True)
+    for _ in range(100):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        handle = open(locks / str(port), "w")
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            handle.close()
+            continue
+        _PORT_LOCKS.append(handle)
+        return port
+    raise RuntimeError("no free port: every port tried was claimed by another harness")
 
 
 def offline_uuid(name):
@@ -130,13 +199,14 @@ def varint(value):
 def parse_varint(data, pos):
     """The VarInt at data[pos]: (the position after it, its unsigned value)."""
     value = shift = 0
-    while True:
+    for _ in range(5):
         b = data[pos]
         pos += 1
         value |= (b & 0x7F) << shift
         shift += 7
         if not b & 0x80:
             return pos, value
+    raise ValueError("VarInt too big")
 
 
 def fbits(value):

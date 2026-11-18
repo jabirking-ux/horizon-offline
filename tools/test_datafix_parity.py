@@ -2,7 +2,7 @@
 """DataFixer differential test: worlds saved by older game versions, upgraded by
 vanilla 26.3 and by Horizon, must give the same data.
 
-For every sample world in datafix/worlds beside the shared vanilla data (made by
+For every sample world in the private datafix/worlds directory (made by
 tools/datafix_worlds.py with the official server jars of 1.18.2 to 26.2, and
 generated automatically when missing), two upgrades run on a copy:
 
@@ -36,15 +36,17 @@ import anvil_dump  # noqa: E402
 import parity_shard  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-LOCAL = ROOT / '.local' / 'datafix'
-WORLDS = (ROOT / '.local' / 'minecraft').resolve().parent / 'datafix' / 'worlds'
+from datafix_paths import writable_root
+
+LOCAL = writable_root()
+WORLDS = LOCAL / 'worlds'
 RUN = LOCAL / 'run'
 
 PARITY_SHARDS = 6
 # What the datafix_world probe can reach, checked by tools/parity.py: it reruns
 # this harness only when these sources (or the harness, oracle and data) change.
 PARITY_RUST_SCOPE = [
-    'crates/horizon-world/src/datafix/', 'crates/horizon-world/src/nbt.rs', 'crates/horizon-world/src/region.rs',
+    'crates/horizon-world/src/datafix/', 'crates/horizon-core/src/nbt.rs', 'crates/horizon-world/src/region.rs',
     'crates/horizon-world/src/compression.rs', 'crates/horizon-core/src/position.rs', 'crates/horizon-core/src/position/',
     'crates/horizon-core/src/geometry/', 'crates/horizon-core/src/version.rs',
 ]
@@ -83,9 +85,14 @@ def run_vanilla(classpath, world, out, target=None):
     # The oracle replaces OUT itself: left in place, an unchanged run's outputs can be reused.
     log = out.parent / (out.name + '.log')
     with log.open('w') as f:
-        subprocess.run(['java', '-Xmx3g', '-Djava.awt.headless=true', '-cp', classpath,
-                        'dev.horizonlab.parity.VanillaDataFixOracle', str(world), str(out), *([str(target)] if target else [])],
-                       check=True, stdout=f, stderr=subprocess.STDOUT)
+        result = subprocess.run(['java', '-Xmx3g', '-Djava.awt.headless=true', '-cp', classpath,
+                                 'dev.horizonlab.parity.VanillaDataFixOracle', str(world), str(out), *([str(target)] if target else [])],
+                                stdout=f, stderr=subprocess.STDOUT)
+    if result.returncode:
+        # The traceback of a failed check names the command, not why the JVM stopped: show its exit and last output.
+        how = f'exit {result.returncode}' + (' (killed by signal %d)' % -result.returncode if result.returncode < 0 else '')
+        tail = '\n'.join(log.read_text(errors='replace').splitlines()[-20:])
+        raise SystemExit(f'the vanilla oracle failed on {world.name} ({how}); the end of {log}:\n{tail}')
 
 
 def run_horizon(binary, world, out, target=None):
@@ -207,10 +214,10 @@ def main():
                    'file fixes), on the sample worlds saved before it, for developing the fixes of a range of versions')
     args = p.parse_args()
     import datafix_worlds
-    import fcntl
+    import file_lock
     WORLDS.parent.mkdir(parents=True, exist_ok=True)
-    with open(WORLDS.parent / 'generate.lock', 'w') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)  # another worktree may be generating them
+    with open(WORLDS.parent / 'generate.lock', 'w') as handle:
+        file_lock.lock(handle)  # another process may be generating them
         missing = [v for v in [*datafix_worlds.VERSIONS, *datafix_worlds.VARIANTS] if not (datafix_worlds.worlds_dir(v) / v / 'level.dat').exists()]
         if missing:
             print('generating sample worlds:', ' '.join(missing), flush=True)

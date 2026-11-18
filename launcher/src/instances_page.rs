@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 /// Textures offered as icons, when the player's prepared files hold them: block faces and items
 /// that read well at sidebar size.
-const TEXTURES: [&str; 24] = [
+pub(super) const TEXTURES: [&str; 24] = [
     "grass_block_side",
     "oak_planks",
     "oak_log",
@@ -45,14 +45,28 @@ const COLOURS: [&str; 8] = [
 /// The dialog: a new instance (`editing` None) or one being changed. Its name and group are the
 /// text fields `Field::InstanceName` and `Field::InstanceGroup`.
 pub(super) struct InstanceDialog {
-    editing: Option<String>,
+    pub(super) editing: Option<String>,
     /// A new instance copies the selected one's worlds, options and packs.
-    copy: bool,
-    icon: Option<Icon>,
-    error: Option<String>,
-    busy: bool,
+    pub(super) copy: bool,
+    pub(super) icon: Option<Icon>,
+    /// A picture chosen since it opened (None in it: the instance's is removed on Save).
+    pub(super) picture: Option<Option<instance_icons::Chosen>>,
+    pub(super) error: Option<String>,
+    pub(super) busy: bool,
     /// Horizon, or the Java game it plays.
     pub(super) java: new_instance::JavaChoice,
+    /// The Horizon version it keeps (`Instance::version`); None follows the launcher's.
+    pub(super) pin: Option<String>,
+    /// The builds "latest" follows (`Instance::channel`); a new instance starts on Stable.
+    pub(super) channel: instances::Channel,
+    /// The loader logo `picture` was made from, when it was one.
+    pub(super) logo: Option<&'static str>,
+    /// The sheet was closed with edits not saved: asking whether to drop them.
+    pub(super) discarding: bool,
+    /// Duplicate is copying this instance.
+    pub(super) copying: bool,
+    /// A Java instance's maximum memory as set in the sheet, kept with Save: None until changed.
+    pub(super) memory: Option<u32>,
 }
 
 /// The instances and their icons as images, kept between frames.
@@ -63,14 +77,25 @@ pub(super) struct Instances {
     /// The instance whose Delete is waiting for its confirmation, and why the last one failed.
     confirm_delete: Option<String>,
     delete_error: Option<String>,
-    icons: HashMap<(String, u32), Option<Arc<RenderImage>>>,
+    /// Textures, pictures and marks as images, by name and size in device pixels.
+    pub(super) icons: HashMap<(String, u32), Option<Arc<RenderImage>>>,
     /// Mojang's versions, for a new Java instance.
     pub(super) versions: new_instance::VersionList,
+}
+
+impl Instances {
+    pub(super) fn location_busy(&self) -> bool {
+        self.dialog.as_ref().is_some_and(|d| d.busy)
+    }
 }
 
 impl Launcher {
     pub(super) fn reload_instances(&mut self) {
         self.instances.list = instances::list();
+        // A picture may have come or gone with the change.
+        self.instances
+            .icons
+            .retain(|(key, _), _| !key.starts_with("picture:"));
     }
 
     /// The instance Play starts.
@@ -88,7 +113,16 @@ impl Launcher {
     pub(super) fn version_of(&self, instance: &Instance) -> Option<&String> {
         match &instance.version {
             Some(own) => self.installed.iter().find(|t| *t == own),
-            None => self.launcher_version(),
+            // Latest of its channel: the newest installed Stable build, or the launcher's
+            // version (which follows the newest Nightly; also what is left offline).
+            None => match instance.channel {
+                instances::Channel::Stable => self
+                    .stable_builds()
+                    .iter()
+                    .find_map(|b| self.installed.iter().find(|t| **t == b.tag))
+                    .or_else(|| self.launcher_version()),
+                instances::Channel::Nightly => self.launcher_version(),
+            },
         }
     }
 
@@ -104,13 +138,15 @@ impl Launcher {
     }
 
     pub(super) fn select_instance(&mut self, instance: &Instance) {
+        // A native build's warning names the mods of the instance it was opened for.
+        self.pending_consent = None;
         self.settings.instance =
             (instance.kind != InstanceKind::Default).then(|| instance.id.clone());
-        self.settings.save();
+        self.save_settings();
     }
 
     /// A texture from the selected version's prepared files, its first frame, drawn as pixels.
-    fn texture_image(&mut self, name: &str, size: f32) -> Option<Arc<RenderImage>> {
+    pub(super) fn texture_image(&mut self, name: &str, size: f32) -> Option<Arc<RenderImage>> {
         let tag = self.selected().filter(|t| backend::is_prepared(t))?.clone();
         let scale = self.scale;
         self.instances
@@ -127,9 +163,12 @@ impl Launcher {
             .clone()
     }
 
-    /// An instance's icon, `size` points square.
+    /// An instance's icon, `size` points square (`instance_icons.rs` says which).
     pub(super) fn instance_icon(&mut self, instance: &Instance, size: f32) -> AnyElement {
         let t = self.theme;
+        if let Some(picture) = self.instance_picture(instance, size) {
+            return instance_icons::centred(picture, size, self.scale).into_any_element();
+        }
         let framed = |d: Div| {
             d.flex()
                 .flex_none()
@@ -157,18 +196,11 @@ impl Launcher {
                         .into_any_element();
                 }
             }
-            None if instance.kind == InstanceKind::Default => {
-                if let Some(grass) = self.vanilla_icon() {
-                    return div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .size(px(size))
-                        .child(gpui::img(grass).size(px(size - 4.)))
-                        .into_any_element();
+            None => {
+                if let Some(mark) = self.instance_mark(instance, size) {
+                    return instance_icons::centred(mark, size, self.scale).into_any_element();
                 }
             }
-            None => {}
         }
         blocks::slot(None, &instance.name, size, &t).into_any_element()
     }
@@ -202,7 +234,20 @@ impl Launcher {
                             trf("{version} is not installed", &[("version", own)])
                         }
                         (None, None, None) => tr("No version installed").into(),
+                        (None, Some(tag), _)
+                            if horizon_launcher::developer_install::uses_developer(tag) =>
+                        {
+                            horizon_launcher::developer_install::instance_status(tag, prepared)
+                                .unwrap_or_default()
+                        }
                         (None, Some(_), _) if !prepared => tr("Needs preparing").into(),
+                        (None, Some(tag), _) if self.native_build_of(tag).is_some() => {
+                            let build = self.native_build_of(tag).unwrap_or_default();
+                            trf(
+                                "Native build · {version}",
+                                &[("version", &build.horizon_short())],
+                            )
+                        }
                         (None, Some(tag), Some(_)) => format!("{} · {tag}", tr("Ready")),
                         (None, Some(_), None) => tr("Ready").into(),
                     },
@@ -247,46 +292,212 @@ impl Launcher {
     }
 
     /// Opens the dialog for a new instance, or for changing `editing`.
+    /// The instance sheet for `instance`, open on `tab`. It picks the instance, since Launch and
+    /// Storage act on the one picked.
+    pub(super) fn open_instance_sheet(&mut self, instance: Instance, tab: glass_sheet::SheetTab) {
+        if matches!(instance.kind, InstanceKind::Default | InstanceKind::Own) {
+            self.select_instance(&instance);
+        }
+        self.sheet_tab = tab;
+        self.open_instance_dialog(Some(instance));
+    }
+
     pub(super) fn open_instance_dialog(&mut self, editing: Option<Instance>) {
+        self.version_menu = false;
+        // The hook fields start again from the saved instance, not from what was left typed, and
+        // so does the memory box.
+        self.launch = None;
+        self.memory_slider.forget_typing();
+        let editing_one = editing.is_some();
         let (name, group) = editing
             .as_ref()
             .map(|i| (i.name.clone(), i.group.clone().unwrap_or_default()))
             .unwrap_or_default();
         self.servers.text(Field::InstanceName).set(name);
         self.servers.text(Field::InstanceGroup).set(group);
+        let game = editing
+            .as_ref()
+            .and_then(|i| i.java.clone())
+            .unwrap_or_default();
+        let (width, height) = game
+            .window
+            .map(|(w, h)| (w.to_string(), h.to_string()))
+            .unwrap_or_default();
+        self.servers.text(Field::JavaArgs).set(game.jvm_args);
+        self.servers.text(Field::WindowWidth).set(width);
+        self.servers.text(Field::WindowHeight).set(height);
         self.servers.focus_soon = Some(Field::InstanceName);
+        // What it plays now: Edit can switch it (`instances::switch`).
+        let java = match editing.as_ref().and_then(|i| i.java.as_ref()) {
+            None => Default::default(),
+            Some(j) => new_instance::JavaChoice {
+                kind: match &j.loader {
+                    Some(_) => new_instance::NewKind::Modded,
+                    None => new_instance::NewKind::Vanilla,
+                },
+                loader: j
+                    .loader
+                    .as_ref()
+                    .map_or(horizon_launcher::loaders::Kind::Fabric, |l| l.kind),
+                version: Some(j.minecraft.clone()),
+                ..Default::default()
+            },
+        };
         self.instances.dialog = Some(InstanceDialog {
             icon: editing.as_ref().and_then(|i| i.icon.clone()),
+            pin: editing.as_ref().and_then(|i| i.version.clone()),
+            channel: editing
+                .as_ref()
+                .map_or(instances::Channel::Stable, |i| i.channel),
+            logo: None,
+            discarding: false,
+            copying: false,
+            memory: None,
+            picture: None,
             editing: editing.map(|i| i.id),
             copy: false,
             error: None,
             busy: false,
-            java: Default::default(),
+            java,
         });
         self.servers.text(Field::InstanceVersion).set(String::new());
+        // A new one starts with the name it would get ("My Horizon"), until the player types one.
+        if !editing_one {
+            self.change(|_| {});
+        }
     }
 
-    /// Escape closes the dialog. Whether it did.
-    pub(super) fn instance_escape(&mut self) -> bool {
-        if self.instances.dialog.as_ref().is_some_and(|d| !d.busy) {
-            self.instances.dialog = None;
-            return true;
+    /// Opens the dialog for a copy of the selected instance, named after it.
+    pub(super) fn start_copy(&mut self) {
+        let Some(name) = self.selected_instance().map(|i| i.name.clone()) else {
+            return;
+        };
+        self.open_instance_dialog(None);
+        self.servers
+            .text(Field::InstanceName)
+            .set(format!("{name} copy"));
+        if let Some(d) = &mut self.instances.dialog {
+            d.copy = true;
         }
-        false
+    }
+
+    /// Closes the dialog; a sheet holding edits not saved asks first. A dialog that is saving
+    /// stays.
+    pub(super) fn close_instance_dialog(&mut self) {
+        let changed = self.sheet_changed();
+        if let Some(d) = self.instances.dialog.as_mut().filter(|d| !d.busy) {
+            if changed {
+                d.discarding = true;
+            } else {
+                self.instances.dialog = None;
+            }
+        }
+    }
+
+    /// Escape closes the dialog, or answers the question about the edits with "Keep editing".
+    /// Whether it did anything.
+    pub(super) fn instance_escape(&mut self) -> bool {
+        match self.instances.dialog.as_mut() {
+            Some(d) if d.busy => false,
+            Some(d) if d.discarding => {
+                d.discarding = false;
+                true
+            }
+            Some(_) => {
+                self.close_instance_dialog();
+                true
+            }
+            None => false,
+        }
     }
 
     /// Creates or changes the instance as the dialog says. A copy can be gigabytes of worlds, so
     /// the work runs in the background.
     pub(super) fn save_instance(&mut self, cx: &mut Context<Self>) {
+        let edited_id = self
+            .instances
+            .dialog
+            .as_ref()
+            .filter(|d| !d.busy)
+            .and_then(|d| d.editing.clone());
+        if edited_id.is_some() {
+            // Nothing to save, as the footer's Save says.
+            if !self.sheet_changed() {
+                return;
+            }
+        }
+        let launch = match edited_id
+            .as_deref()
+            .and_then(|id| self.parsed_launch(id))
+            .transpose()
+        {
+            Ok(launch) => launch,
+            Err(e) => {
+                if let Some(d) = &mut self.instances.dialog {
+                    d.error = Some(e);
+                }
+                return;
+            }
+        };
         let selected = self.selected_instance().map(|i| i.id.clone());
         let name = self.servers.value(Field::InstanceName).trim().to_string();
         let group = Some(self.servers.value(Field::InstanceGroup).to_string());
+        // A Java instance's arguments and window (the sheet's Launch): both sizes or neither.
+        let jvm_args = self.servers.value(Field::JavaArgs).trim().to_string();
+        let window = match validate_window(
+            self.servers.value(Field::WindowWidth),
+            self.servers.value(Field::WindowHeight),
+        ) {
+            Ok(window) => window,
+            Err(()) => {
+                if let Some(d) = &mut self.instances.dialog {
+                    d.error = Some(tr("Window size: enter both width and height as positive whole numbers, or leave both empty.").into());
+                }
+                return;
+            }
+        };
+        // A Horizon version picked but not installed downloads once the instance is saved.
+        let download = self
+            .draft_horizon()
+            .and_then(|tag| self.release_to_install(&tag));
+        // An edited instance switched to another game (`instances::switch`).
+        let switch_to = self
+            .instances
+            .dialog
+            .as_ref()
+            .and_then(|d| d.editing.as_ref())
+            .and_then(|id| self.instances.list.iter().find(|i| &i.id == id))
+            .filter(|i| i.kind == InstanceKind::Own)
+            .and_then(|i| {
+                self.draft_plays(i)
+                    .filter(|to| *to != instances::Plays::of(i))
+            });
+        // Maximum memory as the box holds it, typed or not; text that isn't a size stops Save.
+        let Ok(memory) = self.sheet_memory() else {
+            if let Some(d) = &mut self.instances.dialog {
+                d.error = Some(
+                    tr("Maximum memory: enter a whole number of MB, or leave it empty for the default.")
+                        .into(),
+                );
+            }
+            return;
+        };
         let Some(d) = self.instances.dialog.as_mut().filter(|d| !d.busy) else {
             return;
         };
         let icon = d.icon.clone();
+        let (pin, channel) = (d.pin.clone(), d.channel);
+        let picture = d
+            .picture
+            .as_ref()
+            .map(|p| p.as_ref().map(|c| c.png.clone()));
         let editing = d.editing.clone();
+        let edited = editing.is_some();
         let copy = selected.filter(|_| d.copy);
+        // The picture choice this save keeps: once kept, it is no longer an unsaved edit.
+        let sent_picture = picture.clone();
+        // The Horizon version is Horizon's instances' alone: a Java one plays its own game.
+        let plays_horizon = d.java.kind == new_instance::NewKind::Horizon;
         // A new Java instance: what it plays, and its name when none is typed.
         let java = (editing.is_none() && d.java.kind != new_instance::NewKind::Horizon)
             .then(|| d.java.clone());
@@ -299,6 +510,7 @@ impl Launcher {
         let Some(d) = self.instances.dialog.as_mut() else {
             return;
         };
+        let download = download.filter(|_| plays_horizon);
         let (java, name) = match (java, minecraft) {
             (Some(_), Some(None)) => {
                 d.error = Some(tr("Mojang's version list isn't here yet.").into());
@@ -318,24 +530,74 @@ impl Launcher {
         d.error = None;
         let task = cx.background_executor().spawn(async move {
             let id = match (editing, java) {
-                (Some(id), _) => id,
+                (Some(id), _) => {
+                    if let Some(to) = switch_to {
+                        instances::switch(&id, new_instance::with_loader(to)?)?;
+                    }
+                    id
+                }
                 (None, Some((j, mc))) => new_instance::create_java(&j, &name, &mc)?.id,
                 (None, None) => instances::create(&name, copy.as_deref())?.id,
             };
-            instances::edit(&id, |m| {
+            // Finish fallible picture work before committing the edited metadata and commands.
+            if let Some(png) = picture {
+                let instance = instances::find(&id)?;
+                instances::set_picture(
+                    &instance.home,
+                    png.as_deref(),
+                    &horizon_launcher::desktop_seams::to_trash,
+                )?;
+            }
+            let instance = instances::edit(&id, |m| {
                 m.name = Some(name);
                 m.group = group;
                 m.icon = icon;
-            })
+                if let Some(launch) = launch {
+                    m.launch = launch;
+                }
+                if let Some(game) = m.java.as_mut().filter(|_| edited) {
+                    game.jvm_args = jvm_args;
+                    game.window = window;
+                    if let Some(memory) = memory {
+                        game.memory_mb = Some(memory);
+                    }
+                }
+                if plays_horizon {
+                    m.version = pin;
+                    m.channel = Some(channel);
+                }
+            })?;
+            Ok(instance)
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(instance) => {
-                        this.instances.dialog = None;
+                        let name = [("name", instance.name.as_str())];
+                        crate::glass_toast::say(if edited {
+                            trf("Saved {name}", &name)
+                        } else {
+                            trf("Created {name}", &name)
+                        });
                         this.select_instance(&instance);
                         this.reload_instances();
+                        if let Some(d) = &mut this.instances.dialog {
+                            let now = d.picture.as_ref().map(|p| p.as_ref().map(|c| &c.png));
+                            if now == sent_picture.as_ref().map(Option::as_ref) {
+                                d.picture = None;
+                            }
+                        }
+                        // Edits typed while it saved are still open: the sheet stays for them.
+                        let typed_meanwhile = edited && this.sheet_changed();
+                        match (typed_meanwhile, &mut this.instances.dialog) {
+                            (true, Some(d)) => d.busy = false,
+                            _ => this.instances.dialog = None,
+                        }
+                        // Play shows the download's progress; Versions shows it too.
+                        if let Some(release) = download {
+                            this.install_for_instance(release);
+                        }
                         if matches!(instance.kind, InstanceKind::Default | InstanceKind::Own) {
                             this.go(Page::Play);
                         }
@@ -355,7 +617,15 @@ impl Launcher {
 
     pub(super) fn instance_dialog(&mut self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let t = self.theme;
+        if t.glass {
+            return self.glass_instance_dialog(cx);
+        }
         let d = self.instances.dialog.as_ref()?;
+        let editing_id = d.editing.clone();
+        let chosen = d
+            .picture
+            .as_ref()
+            .map(|p| p.as_ref().map(|c| c.preview.clone()));
         let (editing, copy, icon, error, busy, kind) = (
             d.editing.is_some(),
             d.copy,
@@ -405,7 +675,7 @@ impl Launcher {
         }
         body = body.child(row(
             "Name",
-            self.field(Field::InstanceName, "My instance", 400., cx)
+            self.field(Field::InstanceName, tr("My instance"), 400., cx)
                 .into_any_element(),
         ));
         if !editing && !java {
@@ -429,17 +699,20 @@ impl Launcher {
                 .into_any_element(),
             ));
             body = body.child(text(theme::CAPTION).text_color(t.muted).child(if copy {
-                format!("{from}'s worlds, options and packs are copied; {from} stays as it is.")
+                trf(
+                    "{from}'s worlds, options and packs are copied; {from} stays as it is.",
+                    &[("from", &from)],
+                )
             } else {
-                "Its own worlds and packs; your options and player name come along.".to_string()
+                tr("Its own worlds and packs; your options and player name come along.").to_string()
             }));
         }
         body = body.child(row(
             "Group",
-            self.field(Field::InstanceGroup, "No group", 400., cx)
+            self.field(Field::InstanceGroup, tr("No group"), 400., cx)
                 .into_any_element(),
         ));
-        let mut tiles = div().flex().flex_wrap().gap(px(6.));
+        let mut tiles: Vec<AnyElement> = Vec::new();
         let tile = |id: String, chosen: bool| {
             div()
                 .id(SharedString::from(id))
@@ -452,54 +725,106 @@ impl Launcher {
                 .cursor_pointer()
                 .hover(move |s| s.border_color(t.outline))
         };
-        let none = icon.is_none();
-        tiles = tiles.child(
-            tile("instance-icon-none".into(), none)
-                .child(text(theme::MICRO).text_color(t.muted).child("NONE"))
+        let instance =
+            editing_id.and_then(|id| self.instances.list.iter().find(|i| i.id == id).cloned());
+        // The picture it will show: one just chosen, else its own unless that is being removed.
+        let picture = match chosen {
+            Some(chosen) => chosen,
+            None => instance
+                .as_ref()
+                .and_then(|i| self.instance_picture(i, 28.)),
+        };
+        let pictured = picture.is_some();
+        if let Some(image) = picture {
+            tiles.push(
+                tile("instance-icon-picture".into(), true)
+                    .child(instance_icons::centred(image, 28., self.scale))
+                    .into_any_element(),
+            );
+        }
+        // Nothing chosen: the instance's mark (its loader's, Horizon's), when it has one.
+        let mark = instance.as_ref().and_then(|i| self.instance_mark(i, 28.));
+        tiles.push(
+            tile("instance-icon-none".into(), icon.is_none() && !pictured)
+                .overflow_hidden()
+                .child(match mark {
+                    Some(mark) => instance_icons::centred(mark, 28., self.scale).into_any_element(),
+                    None => text(theme::MICRO)
+                        .text_size(px(8.5))
+                        .text_color(t.muted)
+                        .child(tr("NONE"))
+                        .into_any_element(),
+                })
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     if let Some(d) = &mut this.instances.dialog {
                         d.icon = None;
+                        d.picture = Some(None);
                     }
                     cx.notify();
-                })),
+                }))
+                .into_any_element(),
         );
         for name in TEXTURES {
             let Some(image) = self.texture_image(name, 28.) else {
                 continue;
             };
-            let chosen = icon == Some(Icon::Texture(name.into()));
-            tiles = tiles.child(
+            let chosen = !pictured && icon == Some(Icon::Texture(name.into()));
+            tiles.push(
                 tile(format!("instance-icon-{name}"), chosen)
                     .bg(t.well)
                     .child(gpui::img(image).size(px(28.)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         if let Some(d) = &mut this.instances.dialog {
                             d.icon = Some(Icon::Texture(name.into()));
+                            d.picture = Some(None);
                         }
                         cx.notify();
-                    })),
+                    }))
+                    .into_any_element(),
             );
         }
         for hex in COLOURS {
-            let chosen = icon == Some(Icon::Colour(hex.into()));
+            let chosen = !pictured && icon == Some(Icon::Colour(hex.into()));
             let rgb = u32::from_str_radix(&hex[1..], 16).unwrap_or(0);
-            tiles = tiles.child(
+            tiles.push(
                 tile(format!("instance-icon-{hex}"), chosen)
                     .child(div().size(px(28.)).bg(gpui::rgb(rgb)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         if let Some(d) = &mut this.instances.dialog {
                             d.icon = Some(Icon::Colour(hex.into()));
+                            d.picture = Some(None);
                         }
                         cx.notify();
-                    })),
+                    }))
+                    .into_any_element(),
             );
         }
-        body = body.child(row("Icon", tiles.into_any_element()));
+        let choose = shell::action("instance-picture", shell::Action::Quiet, &t)
+            .child(shell::label(tr("Choose image…").to_string()))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.choose_instance_picture(cx);
+            }));
+        // Rows of eleven: a wrapping row is measured as one line, and the plate would end above
+        // the buttons.
+        let (mut tiles, mut rows) = (tiles.into_iter().peekable(), Vec::new());
+        while tiles.peek().is_some() {
+            rows.push(div().flex().gap(px(6.)).children(tiles.by_ref().take(11)));
+        }
+        body = body.child(row(
+            "Icon",
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .children(rows)
+                .child(div().flex().child(choose))
+                .into_any_element(),
+        ));
         if self.selected().is_none_or(|t| !backend::is_prepared(t)) {
             body = body.child(
                 text(theme::CAPTION)
                     .text_color(t.muted)
-                    .child("Block and item icons come from your prepared game files: prepare a version to see them."),
+                    .child(tr("Block and item icons come from your prepared game files: prepare a version to see them.")),
             );
         }
         if let Some(e) = error {
@@ -579,7 +904,7 @@ impl Launcher {
                 // A Java kind's list can make it taller than the window.
                 .overflow_y_scroll()
                 .bg(plate::alpha(n.page, 0.8))
-                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .on_scroll(|_, _, cx| cx.stop_propagation())
                 .occlude()
                 .child(card),
         )
@@ -590,11 +915,7 @@ impl Launcher {
     pub(super) fn instance_row(&mut self, n: usize, cx: &mut Context<Self>) -> Option<Div> {
         let t = self.theme;
         let instance = self.selected_instance()?.clone();
-        let (home, edit, name) = (
-            instance.home.clone(),
-            instance.clone(),
-            instance.name.clone(),
-        );
+        let (home, edit) = (instance.home.clone(), instance.clone());
         // Under the name, wrapping: six actions don't fit beside it at the window's narrowest.
         let actions = div()
             .flex()
@@ -613,13 +934,7 @@ impl Launcher {
             .child(
                 button("instance-copy", "Copy…", Kind::Ghost, &t).on_click(cx.listener(
                     move |this, _: &ClickEvent, _, cx| {
-                        this.open_instance_dialog(None);
-                        this.servers
-                            .text(Field::InstanceName)
-                            .set(format!("{name} copy"));
-                        if let Some(d) = &mut this.instances.dialog {
-                            d.copy = true;
-                        }
+                        this.start_copy();
                         cx.notify();
                     },
                 )),
@@ -661,7 +976,7 @@ impl Launcher {
                 button("instance-folder", "Open folder", Kind::Ghost, &t).on_click(
                     move |_, _, cx| {
                         let _ = std::fs::create_dir_all(&home);
-                        cx.open_with_system(&home);
+                        crate::glass_toast::open(cx, &home);
                     },
                 ),
             )
@@ -698,7 +1013,11 @@ impl Launcher {
 
 impl Launcher {
     /// Delete…, for every instance but Horizon's own (the game's home); not while a game runs.
-    fn delete_button(&self, instance: &Instance, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+    pub(super) fn delete_button(
+        &self,
+        instance: &Instance,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
         if instance.kind == InstanceKind::Default {
             return None;
         }
@@ -718,7 +1037,11 @@ impl Launcher {
     }
 
     /// "Move it to the Trash?" under the actions, once Delete… is pressed.
-    fn delete_confirmation(&self, instance: &Instance, cx: &mut Context<Self>) -> Option<Div> {
+    pub(super) fn delete_confirmation(
+        &self,
+        instance: &Instance,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
         if self.instances.confirm_delete.as_ref() != Some(&instance.id) {
             return None;
         }
@@ -759,17 +1082,29 @@ impl Launcher {
         )
     }
 
-    fn delete_instance(&mut self, id: &str) {
+    pub(super) fn delete_instance(&mut self, id: &str) {
         if self.client.is_some() || self.starting_client.is_some() {
             return;
         }
-        match instances::delete(id) {
-            Ok(_) => {
+        let name = self
+            .instances
+            .list
+            .iter()
+            .find(|i| i.id == id)
+            .map(|i| i.name.clone());
+        match instances::delete_with_selection(id) {
+            Ok((_, saved)) => {
+                if let Some(name) = name {
+                    crate::glass_toast::say(trf("Deleted {name}", &[("name", &name)]));
+                }
                 self.instances.confirm_delete = None;
+                self.instances.delete_error = None;
                 // Play starts Horizon again; the window's copy of the settings says so too.
                 if self.settings.instance.as_deref() == Some(id) {
                     self.settings.instance = None;
-                    self.settings.save();
+                    self.save_settings();
+                } else if let Err(error) = saved {
+                    self.settings_save_error = Some(error);
                 }
                 self.reload_instances();
             }
@@ -792,19 +1127,55 @@ pub(super) fn played_line(instance: &Instance) -> String {
     }
 }
 
-/// The first letter or digit of a name, for an icon without a picture.
 /// A Java instance's line in the sidebar: "Java 1.21.4", and its loader ("· Fabric 0.16.9").
-fn java_line(j: &instances::JavaGame) -> String {
+pub(super) fn java_line(j: &instances::JavaGame) -> String {
     match &j.loader {
         Some(l) => format!("Java {} · {} {}", j.minecraft, l.kind.name(), l.version),
         None => format!("Java {}", j.minecraft),
     }
 }
 
-fn initial(name: &str) -> String {
+/// The first letter or digit of a name, for an icon without a picture.
+pub(super) fn initial(name: &str) -> String {
     name.chars()
         .find(|c| c.is_alphanumeric())
         .unwrap_or('?')
         .to_uppercase()
         .to_string()
+}
+
+/// Validate the two fields together, without treating an invalid edit as an empty size.
+fn validate_window(width: &str, height: &str) -> Result<Option<(u32, u32)>, ()> {
+    let (width, height) = (width.trim(), height.trim());
+    if width.is_empty() && height.is_empty() {
+        return Ok(None);
+    }
+    let width = width.parse::<u32>().map_err(|_| ())?;
+    let height = height.parse::<u32>().map_err(|_| ())?;
+    if width == 0 || height == 0 {
+        return Err(());
+    }
+    Ok(Some((width, height)))
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::validate_window;
+
+    #[test]
+    fn window_size_requires_two_positive_dimensions_or_two_empty_fields() {
+        assert_eq!(validate_window("", " "), Ok(None));
+        assert_eq!(validate_window(" 1280", "720 "), Ok(Some((1280, 720))));
+        for (width, height) in [
+            ("", "720"),
+            ("1280", ""),
+            ("0", "720"),
+            ("1280", "0"),
+            ("wide", "720"),
+            ("1280", "1.5"),
+            ("4294967296", "720"),
+        ] {
+            assert_eq!(validate_window(width, height), Err(()));
+        }
+    }
 }
