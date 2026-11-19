@@ -486,6 +486,10 @@ struct Launcher {
     proxy_input: line_edit::LineEdit,
     proxy_focused: bool,
     proxy_focus: FocusHandle,
+    /// Settings' Cracked / Offline username field (`offline_name`).
+    offline_name_input: line_edit::LineEdit,
+    offline_name_focused: bool,
+    offline_name_focus: FocusHandle,
     /// Opt-in data collection: the player's answer and Settings' section (`collection`).
     collection: collection::Collection,
     /// Settings' "Connect an AI agent" (`agents_page`).

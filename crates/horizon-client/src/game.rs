@@ -10423,7 +10423,7 @@ impl<'a> Game<'a> {
         );
         let resource_source = pack.source.clone();
         let mut game = Game {
-            wurst: horizon_client::wurst::WurstClient::load(&Self::game_dir()),
+            wurst: horizon_client::wurst::WurstClient::load(&horizon_client::logging::player_dir()),
             structure_spawns: horizon_client::mobs::spawn_selection::StructureSpawns::load(
                 &options.resources,
             ),

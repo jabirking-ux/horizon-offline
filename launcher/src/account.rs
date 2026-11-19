@@ -2564,16 +2564,32 @@ fn java_player_with(
             .into_iter()
             .find_map(|a| Some((a.clone(), secrets_in(store, &a.uuid).filter(|s| s.owns)?)))
     };
-    let (account, secrets) = pass
-        .session
-        .or(pass.owner)
-        .or_else(kept)
-        .ok_or_else(|| NoOwner::default().to_string())?;
+    if let Some((account, secrets)) = pass.session.or(pass.owner).or_else(kept) {
+        return Ok(crate::java_launch::Player {
+            name: account.name,
+            uuid: account.uuid,
+            token: secrets.minecraft_token,
+            xuid: secrets.xuid.unwrap_or_default(),
+        });
+    }
+    let name = crate::backend::Settings::load()
+        .offline_name
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Player".to_owned());
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(format!("OfflinePlayer:{name}").as_bytes());
+    let uuid = format!(
+        "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}3{:01x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2], digest[3],
+        digest[4], digest[5], digest[6] & 0x0f, digest[7],
+        (digest[8] & 0x3f) | 0x80, digest[9], digest[10], digest[11],
+        digest[12], digest[13], digest[14], digest[15]
+    );
     Ok(crate::java_launch::Player {
-        name: account.name,
-        uuid: account.uuid,
-        token: secrets.minecraft_token,
-        xuid: secrets.xuid.unwrap_or_default(),
+        name,
+        uuid,
+        token: "0".to_owned(),
+        xuid: String::new(),
     })
 }
 

@@ -581,11 +581,78 @@ impl Launcher {
         horizon_launcher::proxy::announce(self.settings.proxy.clone());
     }
 
+    pub(crate) fn save_offline_name(&mut self) {
+        let value = self.offline_name_input.text().trim().to_owned();
+        self.settings.offline_name = (!value.is_empty()).then_some(value);
+        self.save_settings();
+    }
+
+    pub(crate) fn offline_name_row(&mut self, n: usize, cx: &mut Context<Self>) -> Div {
+        let t = self.theme;
+        let focused = self.offline_name_focused;
+        let field = div()
+            .id("offline-name-field")
+            .track_focus(&self.offline_name_focus)
+            .w(px(260.))
+            .max_w_full()
+            .px(px(10.))
+            .py(px(6.))
+            .overflow_hidden()
+            .border_2()
+            .border_color(if focused { t.accent } else { t.outline })
+            .bg(t.well)
+            .font_family(theme::MONO)
+            .text_size(px(12.))
+            .cursor_text()
+            .child(line_edit::content(
+                &self.offline_name_input,
+                &t,
+                focused,
+                false,
+                false,
+                tr("Cracked / offline username (e.g. Steve)"),
+            ))
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                window.focus(&this.offline_name_focus, cx);
+                cx.notify();
+            }))
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                match line_edit::handle(&mut this.offline_name_input, ev, cx) {
+                    line_edit::Key::Pass => return,
+                    line_edit::Key::Escape => window.blur(cx),
+                    line_edit::Key::Edited => this.save_offline_name(),
+                    _ => {}
+                }
+                cx.stop_propagation();
+                cx.notify();
+            }));
+        let field = line_edit::mouse(field, cx, |this| &mut this.offline_name_input);
+        let detail = div().child(tr(
+            "Username used when playing offline without a Microsoft account (Horizon and Java Edition).",
+        ));
+        if glass_ui::flat() {
+            return glass_ui::setting_row_stacked(
+                tr("Offline / Cracked username"),
+                Some(detail.into_any_element()),
+                glass_ui::wide_field(field, focused).into_any_element(),
+            );
+        }
+        index_row(
+            n,
+            tr("Offline / Cracked username"),
+            Some(detail.into_any_element()),
+            Some(field.into_any_element()),
+            &t,
+        )
+    }
+
     /// Settings' Microsoft accounts: who is signed in and plays, the sign-in with its code. The
     /// rows are numbered from 01; returns them and how many there are.
     pub(crate) fn account_rows(&mut self, cx: &mut Context<Self>) -> (Div, usize) {
         let t = self.theme;
         let (mut rows, mut n) = self.microsoft_rows(cx);
+        n += 1;
+        rows = rows.child(self.offline_name_row(n, cx));
         n += 1;
         let (title, detail, action) = self.sign_in_parts(cx);
         rows = rows.child(index_row(

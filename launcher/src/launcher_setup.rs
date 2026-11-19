@@ -191,6 +191,13 @@ impl Launcher {
             ),
             proxy_focused: false,
             proxy_focus: cx.focus_handle(),
+            offline_name_input: line_edit::LineEdit::new(
+                settings.offline_name.clone().unwrap_or_default(),
+                16,
+                20,
+            ),
+            offline_name_focused: false,
+            offline_name_focus: cx.focus_handle(),
             settings,
             settings_save_error: None,
             links: backend::Links::default(),

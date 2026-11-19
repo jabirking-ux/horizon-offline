@@ -4193,6 +4193,9 @@ pub struct Settings {
     /// The instance Play starts (`instances`), by id. Unset means Horizon, the game's home.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance: Option<String>,
+    /// Custom offline / cracked username when playing without a Microsoft account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offline_name: Option<String>,
     pub minecraft_dir: Option<PathBuf>,
     pub server_dir: Option<PathBuf>,
     /// Unset means on: only a player who turned it off has `false` here. 0.1.1 wrote its

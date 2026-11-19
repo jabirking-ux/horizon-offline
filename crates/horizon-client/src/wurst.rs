@@ -349,6 +349,8 @@ impl WurstClient {
     /// exists or `HORIZON_WURST=1` is set in the environment.
     pub fn load(game_dir: &Path) -> Self {
         let active = game_dir.join(MARKER_REL_PATH).exists()
+            || std::env::current_dir()
+                .is_ok_and(|c| c.join(MARKER_REL_PATH).exists())
             || std::env::var("HORIZON_WURST").as_deref() == Ok("1");
         let config_path = game_dir.join(CONFIG_FILE);
 

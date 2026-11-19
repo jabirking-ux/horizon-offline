@@ -104,6 +104,7 @@ impl Launcher {
         } else {
             (div(), 0)
         };
+        let offline_row = self.offline_name_row(1, cx);
         let (title, detail, action) = self.sign_in_parts(cx);
         let configured = account::client_id().is_some();
         let idle = self.sign_in_state.is_none()
@@ -172,6 +173,7 @@ impl Launcher {
             .when(has_accounts, |d| {
                 d.child(rows.mx(px(-16.)).mt(px(-16.)).mb(px(16.)))
             })
+            .child(offline_row.mb(px(16.)))
             .child(microsoft::logo(36.))
             .child(
                 div()

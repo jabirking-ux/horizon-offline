@@ -29,6 +29,15 @@ impl Launcher {
                 self.owner = Some(true);
                 if let Some(file) = file {
                     cmd.arg("--session-file").arg(file);
+                } else if let Some(name) = self
+                    .settings
+                    .offline_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    cmd.arg("--name").arg(name);
+                    cmd.env("HORIZON_PLAYER_NAME", name);
                 }
                 cmd.envs(env);
                 // Still play, offline, and say why.
