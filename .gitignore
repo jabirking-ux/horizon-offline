@@ -43,3 +43,5 @@
 
 # Visual Studio editor state.
 .vs/
+
+!launcher/assets/wurst/*.jar
