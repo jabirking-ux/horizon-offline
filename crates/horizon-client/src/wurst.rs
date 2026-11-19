@@ -256,6 +256,7 @@ pub struct WurstSettings {
     // HUD
     pub show_watermark: bool,
     pub show_hacklist: bool,
+    pub show_tabgui: bool,
 }
 
 impl Default for WurstSettings {
@@ -288,6 +289,7 @@ impl Default for WurstSettings {
 
             show_watermark: true,
             show_hacklist: true,
+            show_tabgui: true,
         }
     }
 }
@@ -321,12 +323,14 @@ pub struct GuiWindow {
     pub y: f32,
     pub width: f32,
     pub minimized: bool,
+    pub pinned: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UiSettingId {
     WurstLogo,
     HackList,
+    TabGui,
     FlightHSpeed,
     FlightVSpeed,
     FlightAntiKick,
@@ -338,9 +342,10 @@ pub enum UiSettingId {
 }
 
 impl UiSettingId {
-    pub const ALL: [UiSettingId; 10] = [
+    pub const ALL: [UiSettingId; 11] = [
         UiSettingId::WurstLogo,
         UiSettingId::HackList,
+        UiSettingId::TabGui,
         UiSettingId::FlightHSpeed,
         UiSettingId::FlightVSpeed,
         UiSettingId::FlightAntiKick,
@@ -356,6 +361,9 @@ pub struct WurstClient {
     pub active: bool,
     pub menu_open: bool,
     pub menu_selected: usize,
+    pub tab_selected: usize,
+    pub tab_opened: bool,
+    pub tab_feature_selected: usize,
     pub gui_windows: Vec<GuiWindow>,
     pub gui_dragging: Option<(usize, f32, f32)>,
     pub gui_cursor: [f32; 2],
@@ -400,12 +408,19 @@ impl WurstClient {
             active,
             menu_open: false,
             menu_selected: 0,
+            tab_selected: 0,
+            tab_opened: false,
+            tab_feature_selected: 0,
             gui_windows: vec![
-                GuiWindow { title: "Movement", category: Some(Category::Movement), x: 10.0, y: 26.0, width: 108.0, minimized: false },
-                GuiWindow { title: "Render", category: Some(Category::Render), x: 124.0, y: 26.0, width: 100.0, minimized: false },
-                GuiWindow { title: "Blocks", category: Some(Category::Blocks), x: 230.0, y: 26.0, width: 96.0, minimized: false },
-                GuiWindow { title: "Other", category: Some(Category::Other), x: 332.0, y: 26.0, width: 96.0, minimized: false },
-                GuiWindow { title: "UI Settings", category: None, x: 434.0, y: 26.0, width: 142.0, minimized: false },
+                GuiWindow { title: "Movement", category: Some(Category::Movement), x: 80.0, y: 24.0, width: 92.0, minimized: false, pinned: false },
+                GuiWindow { title: "Render", category: Some(Category::Render), x: 178.0, y: 24.0, width: 84.0, minimized: false, pinned: false },
+                GuiWindow { title: "Combat", category: Some(Category::Combat), x: 268.0, y: 24.0, width: 80.0, minimized: true, pinned: false },
+                GuiWindow { title: "Player", category: Some(Category::Player), x: 354.0, y: 24.0, width: 80.0, minimized: true, pinned: false },
+                GuiWindow { title: "Blocks", category: Some(Category::Blocks), x: 440.0, y: 24.0, width: 80.0, minimized: false, pinned: false },
+                GuiWindow { title: "Chat", category: Some(Category::Chat), x: 526.0, y: 24.0, width: 76.0, minimized: true, pinned: false },
+                GuiWindow { title: "Fun", category: Some(Category::Fun), x: 80.0, y: 42.0, width: 76.0, minimized: true, pinned: false },
+                GuiWindow { title: "Other", category: Some(Category::Other), x: 162.0, y: 42.0, width: 80.0, minimized: false, pinned: false },
+                GuiWindow { title: "UI Settings", category: None, x: 248.0, y: 42.0, width: 132.0, minimized: false, pinned: false },
             ],
             gui_dragging: None,
             gui_cursor: [0.0, 0.0],

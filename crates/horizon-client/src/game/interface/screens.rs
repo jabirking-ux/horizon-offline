@@ -581,6 +581,13 @@ impl Game<'_> {
                     self.show_dialog(&dialog);
                 }
             }
+            29 => {
+                self.pause_focus = None;
+                self.set_screen(Screen::Playing);
+                self.wurst.menu_open = true;
+                self.wurst.gui_dragging = None;
+                self.capture(false);
+            }
             2 => self.close_world()?,
             _ => {}
         }
@@ -597,9 +604,11 @@ impl Game<'_> {
                     && *i < usize::from(u8::MAX - ADDED_PAGES)
             })
             .map(|(i, page)| (page.title(), ADDED_PAGES + i as u8));
-        split
-            .then_some((SPLIT_SETTINGS, 30))
+        self.wurst
+            .active
+            .then_some(("Wurst Options", 29))
             .into_iter()
+            .chain(split.then_some((SPLIT_SETTINGS, 30)))
             .chain(added)
     }
     pub(super) fn pause_click(&mut self) -> Result<()> {

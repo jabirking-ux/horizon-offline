@@ -377,6 +377,49 @@ impl Game<'_> {
             }
             return true;
         }
+        // TabGui.java arrow key navigation
+        if self.wurst.settings.show_tabgui {
+            let cats = Category::ALL;
+            match key {
+                KeyCode::ArrowDown => {
+                    if !self.wurst.tab_opened {
+                        self.wurst.tab_selected = (self.wurst.tab_selected + 1) % cats.len();
+                        self.wurst.tab_feature_selected = 0;
+                    } else {
+                        let n = Self::window_hacks(cats[self.wurst.tab_selected]).len().max(1);
+                        self.wurst.tab_feature_selected = (self.wurst.tab_feature_selected + 1) % n;
+                    }
+                    return true;
+                }
+                KeyCode::ArrowUp => {
+                    if !self.wurst.tab_opened {
+                        self.wurst.tab_selected = (self.wurst.tab_selected + cats.len() - 1) % cats.len();
+                        self.wurst.tab_feature_selected = 0;
+                    } else {
+                        let n = Self::window_hacks(cats[self.wurst.tab_selected]).len().max(1);
+                        self.wurst.tab_feature_selected = (self.wurst.tab_feature_selected + n - 1) % n;
+                    }
+                    return true;
+                }
+                KeyCode::ArrowRight if !self.wurst.tab_opened => {
+                    self.wurst.tab_opened = true;
+                    self.wurst.tab_feature_selected = 0;
+                    return true;
+                }
+                KeyCode::ArrowLeft if self.wurst.tab_opened => {
+                    self.wurst.tab_opened = false;
+                    return true;
+                }
+                KeyCode::Enter if self.wurst.tab_opened => {
+                    let hacks = Self::window_hacks(cats[self.wurst.tab_selected]);
+                    if let Some(&id) = hacks.get(self.wurst.tab_feature_selected) {
+                        self.wurst.toggle(id);
+                    }
+                    return true;
+                }
+                _ => {}
+            }
+        }
         if let Some(name) = keycode_name(key)
             && let Some(&id) = self.wurst.binds.get(name)
         {
@@ -422,6 +465,10 @@ impl Game<'_> {
                 "HackList: {}",
                 if self.wurst.settings.show_hacklist { "ON" } else { "OFF" }
             ),
+            UiSettingId::TabGui => format!(
+                "TabGUI: {}",
+                if self.wurst.settings.show_tabgui { "ON" } else { "OFF" }
+            ),
             UiSettingId::FlightHSpeed => {
                 format!("Flight H: {:.2}", self.wurst.settings.flight_horizontal_speed)
             }
@@ -454,6 +501,7 @@ impl Game<'_> {
         match s {
             UiSettingId::WurstLogo => self.wurst.settings.show_watermark,
             UiSettingId::HackList => self.wurst.settings.show_hacklist,
+            UiSettingId::TabGui => self.wurst.settings.show_tabgui,
             UiSettingId::FlightAntiKick => self.wurst.settings.flight_anti_kick,
             _ => false,
         }
@@ -466,6 +514,9 @@ impl Game<'_> {
             }
             UiSettingId::HackList => {
                 self.wurst.settings.show_hacklist = !self.wurst.settings.show_hacklist;
+            }
+            UiSettingId::TabGui => {
+                self.wurst.settings.show_tabgui = !self.wurst.settings.show_tabgui;
             }
             UiSettingId::FlightHSpeed => {
                 let v = self.wurst.settings.flight_horizontal_speed + delta * 0.25;
@@ -525,9 +576,10 @@ impl Game<'_> {
             // Title bar
             if my <= win.y + title_h {
                 if button == MouseButton::Left {
-                    // Minimize button on right side of title bar
-                    if mx >= win.x + win.width - 14.0 {
+                    if mx >= win.x + win.width - 12.0 {
                         self.wurst.gui_windows[idx].minimized = !win.minimized;
+                    } else if mx >= win.x + win.width - 24.0 {
+                        self.wurst.gui_windows[idx].pinned = !win.pinned;
                     } else {
                         self.wurst.gui_dragging = Some((idx, mx - win.x, my - win.y));
                     }
@@ -589,7 +641,61 @@ impl Game<'_> {
             batch.text_styled(atlas, &Text::literal(ver), 52.0, 8.0, 0xFF_000000, false);
         }
 
-        // 2. HackListHUD.java: clean white text list top-right
+        // 2. TabGui.java: (2, 23), 0x7F_404040 bg, 0x7F_101010 border, 10px rows
+        if self.wurst.settings.show_tabgui {
+            let tx = 2.0_f32;
+            let ty = 23.0_f32;
+            let tw = 64.0_f32;
+            let cats = Category::ALL;
+            let th = (cats.len() as f32) * 10.0;
+            batch.fill(atlas, tx - 1.0, ty - 1.0, tw + 2.0, th + 2.0, 0x7F_101010);
+            batch.fill(atlas, tx, ty, tw, th, 0x7F_404040);
+            for (i, cat) in cats.iter().enumerate() {
+                let prefix = if i == self.wurst.tab_selected {
+                    if self.wurst.tab_opened { "<" } else { ">" }
+                } else {
+                    ""
+                };
+                let label = format!("{prefix}{}", cat.name());
+                batch.text_styled(
+                    atlas,
+                    &Text::literal(label),
+                    tx + 2.0,
+                    ty + 1.0 + (i as f32) * 10.0,
+                    0xFF_F0F0F0,
+                    false,
+                );
+            }
+            if self.wurst.tab_opened {
+                let hacks = Self::window_hacks(cats[self.wurst.tab_selected]);
+                if !hacks.is_empty() {
+                    let sx = tx + tw + 2.0;
+                    let sw = 78.0_f32;
+                    let sh = (hacks.len() as f32) * 10.0;
+                    batch.fill(atlas, sx - 1.0, ty - 1.0, sw + 2.0, sh + 2.0, 0x7F_101010);
+                    batch.fill(atlas, sx, ty, sw, sh, 0x7F_404040);
+                    for (i, &id) in hacks.iter().enumerate() {
+                        let prefix = if i == self.wurst.tab_feature_selected { ">" } else { "" };
+                        let label = format!("{prefix}{}", id.name());
+                        let color = if self.wurst.is_enabled(id) {
+                            0xFF_55FF55
+                        } else {
+                            0xFF_F0F0F0
+                        };
+                        batch.text_styled(
+                            atlas,
+                            &Text::literal(label),
+                            sx + 2.0,
+                            ty + 1.0 + (i as f32) * 10.0,
+                            color,
+                            false,
+                        );
+                    }
+                }
+            }
+        }
+
+        // 3. HackListHUD.java: clean white text list top-right
         if self.wurst.settings.show_hacklist {
             let active_hacks = self.wurst.enabled_render_names();
             let mut y = 4.0_f32;
@@ -601,27 +707,35 @@ impl Game<'_> {
             }
         }
 
-        // 3. ClickGui.java + Window.java + FeatureButton.java
-        if !self.wurst.menu_open {
-            return;
-        }
-
+        // 4. ClickGui.java + Window.java + FeatureButton.java (pinned windows stay visible!)
         let [mx, my] = self.wurst.gui_cursor;
         let title_h = 13.0_f32;
-        let row_h = 13.0_f32;
+        let row_h = 12.0_f32;
         let mut tooltip: Option<&'static str> = None;
 
         for win in &self.wurst.gui_windows {
-            // Wurst7 green title bar (`acColor`) + 1px dark border
-            batch.fill(atlas, win.x - 1.0, win.y - 1.0, win.width + 2.0, title_h + 2.0, 0xFF_202020);
-            batch.fill(atlas, win.x, win.y, win.width, title_h, 0xC8_00B800);
+            if !self.wurst.menu_open && !win.pinned {
+                continue;
+            }
+            // Wurst7 ClickGuiHack colors: acColor = 0x101010 border/title, bgColor = 0x404040 @ 0.5F
+            batch.fill(atlas, win.x - 1.0, win.y - 1.0, win.width + 2.0, title_h + 2.0, 0x7F_101010);
+            batch.fill(atlas, win.x, win.y, win.width, title_h, 0xBF_101010);
             batch.text_styled(
                 atlas,
                 &Text::literal(win.title),
                 win.x + 4.0,
                 win.y + 2.5,
-                0xFF_FFFFFF,
-                true,
+                0xFF_F0F0F0,
+                false,
+            );
+            let pin_color = if win.pinned { 0xFF_55FF55 } else { 0xFF_AAAAAA };
+            batch.text_styled(
+                atlas,
+                &Text::literal("P"),
+                win.x + win.width - 21.0,
+                win.y + 2.5,
+                pin_color,
+                false,
             );
             let min_label = if win.minimized { "+" } else { "-" };
             batch.text_styled(
@@ -629,8 +743,8 @@ impl Game<'_> {
                 &Text::literal(min_label),
                 win.x + win.width - 10.0,
                 win.y + 2.5,
-                0xFF_FFFFFF,
-                true,
+                0xFF_F0F0F0,
+                false,
             );
 
             if win.minimized {
@@ -641,75 +755,78 @@ impl Game<'_> {
             if let Some(cat) = win.category {
                 let hacks = Self::window_hacks(cat);
                 let body_h = (hacks.len() as f32) * row_h + 2.0;
-                // Window body border + background (`bgColor`)
-                batch.fill(atlas, win.x - 1.0, body_y, win.width + 2.0, body_h + 1.0, 0xFF_202020);
-                batch.fill(atlas, win.x, body_y, win.width, body_h, 0xA8_383838);
+                batch.fill(atlas, win.x - 1.0, body_y, win.width + 2.0, body_h + 1.0, 0x7F_101010);
+                batch.fill(atlas, win.x, body_y, win.width, body_h, 0x7F_404040);
 
                 for (i, &id) in hacks.iter().enumerate() {
                     let bx = win.x + 2.0;
                     let by = body_y + 1.0 + (i as f32) * row_h;
                     let bw = win.width - 4.0;
                     let bh = row_h - 1.0;
-                    let hovered = mx >= bx && mx <= bx + bw && my >= by && my <= by + bh;
+                    let hovered = self.wurst.menu_open
+                        && mx >= bx && mx <= bx + bw && my >= by && my <= by + bh;
                     let on = self.wurst.is_enabled(id);
                     if hovered {
                         tooltip = Some(id.description());
                     }
                     let bg = match (on, hovered) {
-                        (true, true) => 0xE0_00E000,
-                        (true, false) => 0xC0_00B800,
-                        (false, true) => 0xC0_606060,
-                        (false, false) => 0x90_444444,
+                        (true, true) => 0xA0_00E000,
+                        (true, false) => 0x80_00C000,
+                        (false, true) => 0x90_606060,
+                        (false, false) => 0x60_404040,
                     };
                     batch.fill(atlas, bx, by, bw, bh, bg);
                     batch.text_styled(
                         atlas,
                         &Text::literal(id.name()),
                         bx + 4.0,
-                        by + 2.0,
-                        if on { 0xFF_FFFFFF } else { 0xFF_E0E0E0 },
-                        true,
+                        by + 1.5,
+                        0xFF_F0F0F0,
+                        false,
                     );
                 }
             } else {
                 let body_h = (UiSettingId::ALL.len() as f32) * row_h + 2.0;
-                batch.fill(atlas, win.x - 1.0, body_y, win.width + 2.0, body_h + 1.0, 0xFF_202020);
-                batch.fill(atlas, win.x, body_y, win.width, body_h, 0xA8_383838);
+                batch.fill(atlas, win.x - 1.0, body_y, win.width + 2.0, body_h + 1.0, 0x7F_101010);
+                batch.fill(atlas, win.x, body_y, win.width, body_h, 0x7F_404040);
 
                 for (i, &s) in UiSettingId::ALL.iter().enumerate() {
                     let bx = win.x + 2.0;
                     let by = body_y + 1.0 + (i as f32) * row_h;
                     let bw = win.width - 4.0;
                     let bh = row_h - 1.0;
-                    let hovered = mx >= bx && mx <= bx + bw && my >= by && my <= by + bh;
+                    let hovered = self.wurst.menu_open
+                        && mx >= bx && mx <= bx + bw && my >= by && my <= by + bh;
                     let on = self.ui_setting_active(s);
                     let bg = match (on, hovered) {
-                        (true, true) => 0xE0_00E000,
-                        (true, false) => 0xC0_00B800,
-                        (false, true) => 0xC0_606060,
-                        (false, false) => 0x90_444444,
+                        (true, true) => 0xA0_00E000,
+                        (true, false) => 0x80_00C000,
+                        (false, true) => 0x90_606060,
+                        (false, false) => 0x60_404040,
                     };
                     batch.fill(atlas, bx, by, bw, bh, bg);
                     batch.text_styled(
                         atlas,
                         &Text::literal(self.ui_setting_label(s)),
                         bx + 4.0,
-                        by + 2.0,
-                        0xFF_FFFFFF,
-                        true,
+                        by + 1.5,
+                        0xFF_F0F0F0,
+                        false,
                     );
                 }
             }
         }
 
         // Hover tooltip box (matching ClickGui.renderTooltip)
-        if let Some(tip) = tooltip {
+        if self.wurst.menu_open
+            && let Some(tip) = tooltip
+        {
             let tw = (tip.len() as f32) * 5.8 + 8.0;
             let tx = (mx + 8.0).min((w - tw - 4.0).max(4.0));
             let ty = my + 10.0;
-            batch.fill(atlas, tx - 1.0, ty - 1.0, tw + 2.0, 14.0, 0xFF_00B800);
-            batch.fill(atlas, tx, ty, tw, 12.0, 0xD8_202020);
-            batch.text_styled(atlas, &Text::literal(tip), tx + 4.0, ty + 2.0, 0xFF_FFFFFF, true);
+            batch.fill(atlas, tx - 1.0, ty - 1.0, tw + 2.0, 14.0, 0x7F_101010);
+            batch.fill(atlas, tx, ty, tw, 12.0, 0xC0_404040);
+            batch.text_styled(atlas, &Text::literal(tip), tx + 4.0, ty + 2.0, 0xFF_F0F0F0, false);
         }
     }
 }
