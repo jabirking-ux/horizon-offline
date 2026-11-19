@@ -1017,6 +1017,7 @@ struct Game<'a> {
     /// translucent pages wait for both before they shrink (`set_terrain_loading`).
     view_arrival: horizon_client::streaming::ViewArrival,
     options: Options,
+    wurst: horizon_client::wurst::WurstClient,
     player: Option<PlayerMotion>,
     spawn: Option<Vec3>,
     clock: FixedStep,
@@ -5135,6 +5136,7 @@ impl Game<'_> {
         }
         self.draw_studio_bars(&mut batch);
         if show_hud {
+            self.draw_wurst_hud(&mut batch);
             self.draw_pad_guide(&mut batch, guide_from);
         }
         batch
@@ -10061,6 +10063,12 @@ impl Game<'_> {
                     }
                     if event.state == ElementState::Pressed
                         && !event.repeat
+                        && self.handle_wurst_key(key)
+                    {
+                        return Ok(());
+                    }
+                    if event.state == ElementState::Pressed
+                        && !event.repeat
                         && horizon_client::keybinds::key_name(key)
                             .is_some_and(|n| self.settings.keys.get("key.smoothCamera") == n)
                     {
@@ -10415,6 +10423,7 @@ impl<'a> Game<'a> {
         );
         let resource_source = pack.source.clone();
         let mut game = Game {
+            wurst: horizon_client::wurst::WurstClient::load(&Self::game_dir()),
             structure_spawns: horizon_client::mobs::spawn_selection::StructureSpawns::load(
                 &options.resources,
             ),

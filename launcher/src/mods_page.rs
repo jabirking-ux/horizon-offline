@@ -2007,13 +2007,32 @@ mod tests {
 }
 
 impl Launcher {
-    /// Wurst Client for Minecraft 26.3, installed into an instance of its own and removed with it.
+    /// Wurst Client card on the Mods tab:
+    /// - For Horizon (Rust) instances (Horizon tab): enables/disables the native Rust Wurst port directly in the selected instance.
+    /// - For Java instances: installs/uninstalls the Java Fabric Wurst Client 26.3 instance.
     pub(super) fn wurst_card(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
-        let installed = horizon_launcher::wurst::installed();
+        let is_horizon = self.mods.java.is_none();
+        let home = self.mods.home();
+        let installed = if is_horizon {
+            horizon_launcher::wurst::horizon_installed(&home)
+        } else {
+            horizon_launcher::wurst::installed()
+        };
         let busy = self.mods.wurst_busy;
-        let confirm = self.mods.wurst_confirm && installed;
-        let blurb = if installed {
+        let confirm = !is_horizon && self.mods.wurst_confirm && installed;
+        let heading = if is_horizon {
+            "Wurst Client v7.57 (Horizon Rust)"
+        } else {
+            "Wurst Client"
+        };
+        let blurb = if is_horizon {
+            if installed {
+                "Wurst Client (Rust port) is installed in this Horizon instance. In-game: press Right Shift for the menu, G for Flight, C for Fullbright, or type .help in chat."
+            } else {
+                "Native Rust port of Wurst Client v7.57 for Horizon (22 hacks: Flight, Fullbright, HighJump, AutoSprint, NoFall, SpeedHack, Spider, Glide, Jesus, NoClip, Step, etc. + .commands + HUD)."
+            }
+        } else if installed {
             "Wurst Client 7.57 is installed in the instance \"Wurst Client 26.3\": select it on the left and press Play."
         } else {
             "Wurst Client 7.57 for Minecraft 26.3 with Fabric and Fabric API, in an instance of its own."
@@ -2038,7 +2057,7 @@ impl Launcher {
             disabled(action)
         } else {
             action.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                if installed && !this.mods.wurst_confirm {
+                if !is_horizon && installed && !this.mods.wurst_confirm {
                     this.mods.wurst_confirm = true;
                     cx.notify();
                     return;
@@ -2046,12 +2065,21 @@ impl Launcher {
                 this.mods.wurst_confirm = false;
                 this.mods.wurst_busy = true;
                 this.mods.wurst_note = None;
+                let home = home.clone();
                 cx.notify();
                 cx.spawn(async move |this, cx| {
                     let done = cx
                         .background_executor()
                         .spawn(async move {
-                            if installed {
+                            if is_horizon {
+                                if installed {
+                                    horizon_launcher::wurst::uninstall_horizon(&home)
+                                        .map(|_| "Wurst Client (Rust) uninstalled from this Horizon instance.".to_string())
+                                } else {
+                                    horizon_launcher::wurst::install_horizon(&home)
+                                        .map(|_| "Wurst Client (Rust) installed! Press Play, then Right Shift or .help in chat.".to_string())
+                                }
+                            } else if installed {
                                 horizon_launcher::wurst::uninstall()
                                     .map(|_| "Wurst Client removed.".to_string())
                             } else {
@@ -2077,7 +2105,7 @@ impl Launcher {
             .child(
                 text(theme::LABEL)
                     .text_color(t.ink)
-                    .child(tr("Wurst Client").to_string()),
+                    .child(tr(heading).to_string()),
             )
             .child(
                 text(theme::LABEL)

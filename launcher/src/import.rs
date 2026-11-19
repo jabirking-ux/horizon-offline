@@ -36,6 +36,8 @@ pub enum Dropped {
     Pack(packs::Kind),
     /// A data pack: it goes into a world.
     DataPack,
+    /// A Java mod (`.jar`), with its detected loader if known.
+    JavaMod(Option<crate::loaders::Kind>),
     /// A game build: a `horizon-client` program, or a release archive or an
     /// Actions artifact around one. `build_import` installs it as its own
     /// version beside the releases, so a build can be played without waiting
@@ -70,6 +72,24 @@ fn read_index(zip: &mut Archive<fs::File>) -> Result<serde_json::Value, String> 
     serde_json::from_slice(&text).map_err(|e| format!("{INDEX}: {e}"))
 }
 
+/// Detects whether a `.jar` file is a Fabric, Quilt, Forge, or NeoForge mod from its metadata.
+pub fn detect_jar_loader(file: &Path) -> Result<Option<crate::loaders::Kind>, String> {
+    let mut zip = open(file)?;
+    if zip.by_name("fabric.mod.json").is_ok() {
+        return Ok(Some(crate::loaders::Kind::Fabric));
+    }
+    if zip.by_name("quilt.mod.json").is_ok() {
+        return Ok(Some(crate::loaders::Kind::Quilt));
+    }
+    if zip.by_name("META-INF/neoforge.mods.toml").is_ok() {
+        return Ok(Some(crate::loaders::Kind::NeoForge));
+    }
+    if zip.by_name("META-INF/mods.toml").is_ok() || zip.by_name("mcmod.info").is_ok() {
+        return Ok(Some(crate::loaders::Kind::Forge));
+    }
+    Ok(None)
+}
+
 /// What `file` is, from its name and what is inside.
 pub fn what(file: &Path) -> Result<Dropped, String> {
     let name = name_of(file);
@@ -78,6 +98,7 @@ pub fn what(file: &Path) -> Result<Dropped, String> {
         .map(|e| e.to_string_lossy().to_ascii_lowercase());
     match ext.as_deref() {
         Some("hshader") => return packs::kind_of(file).map(Dropped::Pack),
+        Some("jar") => return detect_jar_loader(file).map(Dropped::JavaMod),
         // A game build: the program itself, or a release archive around it.
         // Taken on the extension alone, unread, so that `build_import` is the
         // one to say why a file with this name is not a game -- a better answer

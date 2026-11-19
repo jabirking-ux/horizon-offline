@@ -105,6 +105,33 @@ pub fn uninstall() -> Result<(), String> {
     }
 }
 
+/// Marker file inside a Horizon (Rust) instance's folder that activates the native Rust Wurst port.
+pub const HORIZON_MARKER: &str = "horizon-native-mods/wurst.enabled";
+
+/// Whether the native Rust Wurst port is enabled for the Horizon instance at `home`.
+pub fn horizon_installed(home: &std::path::Path) -> bool {
+    home.join(HORIZON_MARKER).exists()
+}
+
+/// Enables the native Rust Wurst port for the Horizon instance at `home`.
+pub fn install_horizon(home: &std::path::Path) -> Result<(), String> {
+    let marker = home.join(HORIZON_MARKER);
+    if let Some(parent) = marker.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    fs::write(&marker, "Wurst Client v7.57 (Rust native port)\n")
+        .map_err(|e| format!("{}: {e}", marker.display()))
+}
+
+/// Disables the native Rust Wurst port for the Horizon instance at `home`.
+pub fn uninstall_horizon(home: &std::path::Path) -> Result<(), String> {
+    let marker = home.join(HORIZON_MARKER);
+    if marker.exists() {
+        fs::remove_file(&marker).map_err(|e| format!("{}: {e}", marker.display()))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

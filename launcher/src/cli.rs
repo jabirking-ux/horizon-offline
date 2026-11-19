@@ -3203,6 +3203,9 @@ fn instance(action: InstanceCmd, as_json: bool) -> Result<(), String> {
                         pack.slug
                     );
                 }
+                Dropped::JavaMod(_) => {
+                    return Err("Drop .jar mods onto the launcher window to add them to a Java instance.".into());
+                }
                 // A game build is its own command: it installs a version
                 // rather than touching an instance, and takes a `--version` to
                 // say which release's game files it plays with.

@@ -75,6 +75,40 @@ impl Launcher {
                         &[("name", &name)],
                     )))
                 }
+                Ok(Dropped::JavaMod(detected)) => {
+                    let Some(i) = self.selected_instance().cloned() else {
+                        continue;
+                    };
+                    let Some(java) = &i.java else {
+                        self.importing.note =
+                            Some(Err("This mod is incompatible with your loader!".into()));
+                        continue;
+                    };
+                    let compatible = match (&java.loader, detected) {
+                        (None, Some(_)) => false,
+                        (Some(inst), Some(mod_kind)) => {
+                            inst.kind == mod_kind
+                                || (inst.kind == horizon_launcher::loaders::Kind::Quilt
+                                    && mod_kind == horizon_launcher::loaders::Kind::Fabric)
+                        }
+                        (_, None) => true,
+                    };
+                    if !compatible {
+                        self.importing.note =
+                            Some(Err("This mod is incompatible with your loader!".into()));
+                        continue;
+                    }
+                    let mods_dir = i.home.join("mods");
+                    let res = std::fs::create_dir_all(&mods_dir)
+                        .and_then(|_| std::fs::copy(&file, mods_dir.join(&name)).map(|_| ()));
+                    self.importing.note = Some(match res {
+                        Ok(()) => {
+                            self.mods.reload_installed();
+                            Ok(format!("Added {name} to {}'s mods.", i.name))
+                        }
+                        Err(e) => Err(format!("Could not add {name}: {e}")),
+                    });
+                }
             }
         }
     }

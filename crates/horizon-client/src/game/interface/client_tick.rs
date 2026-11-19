@@ -4,6 +4,7 @@ use horizon_client::Result;
 
 impl Game<'_> {
     pub(super) fn tick_client_lead(&mut self) -> Result<()> {
+        self.tick_wurst();
         self.tick_debug_keys()?;
         self.tick_debug_charts();
         self.tick_tutorial();

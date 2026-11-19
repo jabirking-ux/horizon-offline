@@ -1360,6 +1360,9 @@ impl Game<'_> {
             return;
         }
         self.ui.chat.add_recent(&message);
+        if self.handle_wurst_command(&message) {
+            return;
+        }
         if let Some(args) =
             horizon_profiler_args(&message, self.remote.as_ref().map(|r| &r.chat_tree))
         {

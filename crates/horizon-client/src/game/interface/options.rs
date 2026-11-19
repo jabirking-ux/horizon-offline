@@ -829,7 +829,10 @@ impl Game<'_> {
         );
         self.settings.fullbright_held = held;
         if let Some(r) = self.renderer.as_mut() {
-            r.fullbright = self.settings.extras.fullbright && !held;
+            r.fullbright = (self.settings.extras.fullbright && !held)
+                || self
+                    .wurst
+                    .is_enabled(horizon_client::wurst::HackId::Fullbright);
         }
     }
 }
