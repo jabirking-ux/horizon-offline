@@ -68,6 +68,7 @@ pub mod wardrobe;
 #[cfg(windows)]
 mod windows_runtime;
 pub mod worlds;
+pub mod wurst;
 
 pub mod jars;
 

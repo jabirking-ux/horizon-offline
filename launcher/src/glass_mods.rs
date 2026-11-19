@@ -212,6 +212,9 @@ impl Launcher {
         if self.mods.kind == PackKind::Mod && self.mods.java.is_none() {
             more.push(card(self.github_panel(cx)));
         }
+        if self.mods.kind == PackKind::Mod {
+            more.push(card(self.wurst_card(cx)));
+        }
         more.extend(self.mods_installed_list(cx).map(card));
         div().flex().flex_col().child(header).child(cards).child(
             div()

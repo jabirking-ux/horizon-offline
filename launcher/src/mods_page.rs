@@ -95,6 +95,10 @@ pub(super) struct Mods {
     loaded: bool,
     /// Whether the page searched for the instance as it is (its version and loader).
     asked: bool,
+    /// Wurst Client's card: what it last said, whether it is working, and a pending uninstall.
+    wurst_note: Option<String>,
+    wurst_busy: bool,
+    wurst_confirm: bool,
     /// The game folder the browser installs into and lists: the selected instance's.
     home: Option<PathBuf>,
     /// The selected Java instance's version and loader: its mods and resource packs are the
@@ -213,6 +217,9 @@ impl Mods {
             checked_for: None,
             loaded: false,
             asked: false,
+            wurst_note: None,
+            wurst_busy: false,
+            wurst_confirm: false,
             home: None,
             java: None,
             worlds: Vec::new(),
@@ -1279,6 +1286,9 @@ impl Launcher {
                 .child(section_title("Browse modpacks", "search", &t));
         }
         body = body.child(controls);
+        if self.mods.kind == PackKind::Mod {
+            body = body.child(self.wurst_card(cx));
+        }
         // Native mods from a GitHub link: Horizon instances, on the Mods tab.
         if self.mods.kind == PackKind::Mod && self.mods.java.is_none() {
             body = body.child(self.github_panel(cx));
@@ -1993,5 +2003,93 @@ mod tests {
         };
         assert_eq!(shown(&results, false, support), [1, 3]);
         assert_eq!(shown(&results, true, support), [0, 1, 2, 3]);
+    }
+}
+
+impl Launcher {
+    /// Wurst Client for Minecraft 26.3, installed into an instance of its own and removed with it.
+    pub(super) fn wurst_card(&mut self, cx: &mut Context<Self>) -> Div {
+        let t = self.theme;
+        let installed = horizon_launcher::wurst::installed();
+        let busy = self.mods.wurst_busy;
+        let confirm = self.mods.wurst_confirm && installed;
+        let blurb = if installed {
+            "Wurst Client 7.57 is installed in the instance \"Wurst Client 26.3\": select it on the left and press Play."
+        } else {
+            "Wurst Client 7.57 for Minecraft 26.3 with Fabric and Fabric API, in an instance of its own."
+        };
+        let label = match (busy, installed, confirm) {
+            (true, _, _) => "Working…",
+            (false, false, _) => "Install Wurst Client",
+            (false, true, false) => "Uninstall Wurst Client",
+            (false, true, true) => "Click again: removes the instance and its worlds",
+        };
+        let action = button(
+            "wurst-action",
+            tr(label).to_string(),
+            if installed {
+                Kind::Secondary
+            } else {
+                Kind::Primary
+            },
+            &t,
+        );
+        let action = if busy {
+            disabled(action)
+        } else {
+            action.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                if installed && !this.mods.wurst_confirm {
+                    this.mods.wurst_confirm = true;
+                    cx.notify();
+                    return;
+                }
+                this.mods.wurst_confirm = false;
+                this.mods.wurst_busy = true;
+                this.mods.wurst_note = None;
+                cx.notify();
+                cx.spawn(async move |this, cx| {
+                    let done = cx
+                        .background_executor()
+                        .spawn(async move {
+                            if installed {
+                                horizon_launcher::wurst::uninstall()
+                                    .map(|_| "Wurst Client removed.".to_string())
+                            } else {
+                                horizon_launcher::wurst::install(horizon_launcher::wurst::INSTANCE)
+                                    .map(|_| "Wurst Client is ready.".to_string())
+                            }
+                        })
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.mods.wurst_busy = false;
+                        this.mods.wurst_note = Some(done.unwrap_or_else(|e| e));
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }))
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .p(px(16.))
+            .child(
+                text(theme::LABEL)
+                    .text_color(t.ink)
+                    .child(tr("Wurst Client").to_string()),
+            )
+            .child(
+                text(theme::LABEL)
+                    .text_color(t.ink_soft)
+                    .child(tr(blurb).to_string()),
+            )
+            .child(div().flex().child(action))
+            .children(
+                self.mods
+                    .wurst_note
+                    .clone()
+                    .map(|n| text(theme::LABEL).text_color(t.ink_soft).child(n)),
+            )
     }
 }

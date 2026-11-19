@@ -951,6 +951,15 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<DataCmd>,
     },
+    /// Wurst Client for Minecraft 26.3: makes a Fabric instance with Wurst and Fabric API
+    Wurst {
+        /// Remove Wurst's instance instead
+        #[arg(long)]
+        uninstall: bool,
+        /// The instance's name
+        #[arg(default_value = "Wurst Client 26.3")]
+        name: String,
+    },
     /// Instances: separate game folders, each with its own worlds, options and packs
     Instance {
         #[command(subcommand)]
@@ -1813,6 +1822,19 @@ fn execute(command: Cmd, as_json: bool) -> Result<i32, String> {
             action.unwrap_or(MultiplayerCmd::List { instance: None }),
             as_json,
         )?,
+        Cmd::Wurst {
+            uninstall: true, ..
+        } => {
+            horizon_launcher::wurst::uninstall()?;
+            println!("Wurst Client removed.");
+        }
+        Cmd::Wurst { name, .. } => {
+            let made = horizon_launcher::wurst::install(&name)?;
+            println!(
+                "Wurst Client is ready in the instance {:?}. Select it and press Play.",
+                made.name
+            );
+        }
         Cmd::Instance { action } => instance(action.unwrap_or(InstanceCmd::List), as_json)?,
         Cmd::Modpack { action } => return modpack(action.unwrap_or(ModpackCmd::List), as_json),
         Cmd::Mods { action } => mods(action.unwrap_or(ModsCmd::List { instance: None }), as_json)?,
