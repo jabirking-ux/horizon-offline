@@ -313,10 +313,52 @@ pub enum CommandAction {
     GameMode(u8),
 }
 
+#[derive(Clone, Debug)]
+pub struct GuiWindow {
+    pub title: &'static str,
+    pub category: Option<Category>,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub minimized: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiSettingId {
+    WurstLogo,
+    HackList,
+    FlightHSpeed,
+    FlightVSpeed,
+    FlightAntiKick,
+    SpeedMultiplier,
+    HighJumpHeight,
+    StepHeight,
+    TimerSpeed,
+    GlideFallSpeed,
+}
+
+impl UiSettingId {
+    pub const ALL: [UiSettingId; 10] = [
+        UiSettingId::WurstLogo,
+        UiSettingId::HackList,
+        UiSettingId::FlightHSpeed,
+        UiSettingId::FlightVSpeed,
+        UiSettingId::FlightAntiKick,
+        UiSettingId::SpeedMultiplier,
+        UiSettingId::HighJumpHeight,
+        UiSettingId::StepHeight,
+        UiSettingId::TimerSpeed,
+        UiSettingId::GlideFallSpeed,
+    ];
+}
+
 pub struct WurstClient {
     pub active: bool,
     pub menu_open: bool,
     pub menu_selected: usize,
+    pub gui_windows: Vec<GuiWindow>,
+    pub gui_dragging: Option<(usize, f32, f32)>,
+    pub gui_cursor: [f32; 2],
     pub enabled: HashMap<HackId, bool>,
     pub settings: WurstSettings,
     /// Uppercase key name (e.g. "G", "C", "R") -> HackId
@@ -358,6 +400,15 @@ impl WurstClient {
             active,
             menu_open: false,
             menu_selected: 0,
+            gui_windows: vec![
+                GuiWindow { title: "Movement", category: Some(Category::Movement), x: 10.0, y: 26.0, width: 108.0, minimized: false },
+                GuiWindow { title: "Render", category: Some(Category::Render), x: 124.0, y: 26.0, width: 100.0, minimized: false },
+                GuiWindow { title: "Blocks", category: Some(Category::Blocks), x: 230.0, y: 26.0, width: 96.0, minimized: false },
+                GuiWindow { title: "Other", category: Some(Category::Other), x: 332.0, y: 26.0, width: 96.0, minimized: false },
+                GuiWindow { title: "UI Settings", category: None, x: 434.0, y: 26.0, width: 142.0, minimized: false },
+            ],
+            gui_dragging: None,
+            gui_cursor: [0.0, 0.0],
             enabled: HashMap::new(),
             settings: WurstSettings::default(),
             binds: Self::default_binds(),

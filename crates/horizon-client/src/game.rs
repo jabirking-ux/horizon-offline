@@ -9299,6 +9299,9 @@ impl Game<'_> {
                         if self.screen == Screen::DebugOptions {
                             self.debug_options_drag();
                         }
+                        if self.wurst.menu_open {
+                            self.handle_wurst_mouse_move(self.cursor.0, self.cursor.1);
+                        }
                         if self.screen == Screen::HudEditor {
                             self.hud_editor_drag();
                         }
@@ -9473,6 +9476,8 @@ impl Game<'_> {
                         self.advancements_scroll(scaled(raw_x) as f32, d);
                     }
                 }
+                WindowEvent::MouseInput { state, button, .. }
+                    if self.handle_wurst_mouse(button, state == ElementState::Pressed) => {}
                 WindowEvent::MouseInput { state, button, .. } if self.command_prompt.is_some() => {
                     if state == ElementState::Pressed && button == MouseButton::Left {
                         self.command_prompt_click();
