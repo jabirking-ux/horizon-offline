@@ -81,6 +81,37 @@ macro_rules! define_hacks {
                     $(HackId::$variant => $desc,)*
                 }
             }
+
+            pub fn search_tags(self) -> &'static [&'static str] {
+                match self {
+                    HackId::Flight => &["fly", "creative fly"],
+                    HackId::Killaura => &["kill aura", "forcefield"],
+                    HackId::MultiAura => &["multi aura", "forcefield"],
+                    HackId::XRay => &["x-ray", "xray", "ore"],
+                    HackId::Fullbright => &["brightness", "gamma", "night vision"],
+                    HackId::Jesus => &["waterwalk", "lava walk"],
+                    HackId::Nuker => &["auto mine", "smash"],
+                    HackId::ScaffoldWalk => &["bridge", "auto bridge"],
+                    HackId::SpeedHack => &["bhop", "fast"],
+                    HackId::Timer => &["game speed", "tick speed"],
+                    HackId::NoFall => &["no fall damage"],
+                    HackId::HighJump => &["jump boost"],
+                    HackId::AutoSprint => &["sprint"],
+                    HackId::Freecam => &["free cam", "spectator"],
+                    HackId::RainbowUI => &["rainbow", "rgb", "chroma"],
+                    _ => &[],
+                }
+            }
+
+            pub fn matches_search(self, query_lower: &str) -> bool {
+                if query_lower.is_empty() {
+                    return true;
+                }
+                self.name().to_lowercase().contains(query_lower)
+                    || self.description().to_lowercase().contains(query_lower)
+                    || self.category().name().to_lowercase().contains(query_lower)
+                    || self.search_tags().iter().any(|t| t.contains(query_lower))
+            }
         }
     };
 }
@@ -350,6 +381,15 @@ pub struct WurstSettings {
     pub count_users: bool,
     pub spoof_vanilla: bool,
     pub translations: bool,
+
+    // ClickGuiHack.java
+    pub clickgui_bg_color: [u8; 3],
+    pub clickgui_ac_color: [u8; 3],
+    pub clickgui_txt_color: [u8; 3],
+    pub clickgui_opacity: f64,
+    pub clickgui_tt_opacity: f64,
+    pub clickgui_max_height: u32,
+    pub clickgui_max_settings_height: u32,
 }
 
 impl Default for WurstSettings {
@@ -393,6 +433,14 @@ impl Default for WurstSettings {
             count_users: true,
             spoof_vanilla: false,
             translations: true,
+
+            clickgui_bg_color: [0x40, 0x40, 0x40],
+            clickgui_ac_color: [0x10, 0x10, 0x10],
+            clickgui_txt_color: [0xF0, 0xF0, 0xF0],
+            clickgui_opacity: 0.5,
+            clickgui_tt_opacity: 0.75,
+            clickgui_max_height: 200,
+            clickgui_max_settings_height: 200,
         }
     }
 }
@@ -450,15 +498,23 @@ pub enum UiSettingId {
     StepHeight,
     TimerSpeed,
     GlideFallSpeed,
+    ClickGuiOpacity,
+    ClickGuiTtOpacity,
+    ClickGuiMaxHeight,
+    ClickGuiMaxSettingsHeight,
 }
 
 impl UiSettingId {
-    pub const ALL: [UiSettingId; 13] = [
+    pub const ALL: [UiSettingId; 17] = [
         UiSettingId::WurstLogo,
         UiSettingId::HackList,
         UiSettingId::TabGui,
         UiSettingId::KeybindManager,
         UiSettingId::WurstOptions,
+        UiSettingId::ClickGuiOpacity,
+        UiSettingId::ClickGuiTtOpacity,
+        UiSettingId::ClickGuiMaxHeight,
+        UiSettingId::ClickGuiMaxSettingsHeight,
         UiSettingId::FlightHSpeed,
         UiSettingId::FlightVSpeed,
         UiSettingId::FlightAntiKick,
@@ -477,6 +533,9 @@ pub struct WurstClient {
     pub navigator_feature: Option<HackId>,
     pub navigator_query: String,
     pub navigator_scroll: usize,
+    pub navigator_selected: usize,
+    pub navigator_scrollbar_dragging: Option<f32>,
+    pub navigator_keybind_listening: bool,
     pub wurst_options_open: bool,
     pub wurst_options_from_pause: bool,
     pub menu_selected: usize,
@@ -486,6 +545,8 @@ pub struct WurstClient {
     pub gui_windows: Vec<GuiWindow>,
     pub gui_dragging: Option<(usize, f32, f32)>,
     pub settings_popup: Option<(HackId, f32, f32)>,
+    pub settings_dragging: Option<(f32, f32)>,
+    pub slider_dragging: Option<UiSettingId>,
     pub gui_cursor: [f32; 2],
     pub enabled: HashMap<HackId, bool>,
     pub settings: WurstSettings,
@@ -528,6 +589,9 @@ impl WurstClient {
             navigator_feature: None,
             navigator_query: String::new(),
             navigator_scroll: 0,
+            navigator_selected: 0,
+            navigator_scrollbar_dragging: None,
+            navigator_keybind_listening: false,
             wurst_options_open: false,
             wurst_options_from_pause: false,
             menu_selected: 0,
@@ -547,6 +611,8 @@ impl WurstClient {
             ],
             gui_dragging: None,
             settings_popup: None,
+            settings_dragging: None,
+            slider_dragging: None,
             gui_cursor: [0.0, 0.0],
             enabled: HashMap::new(),
             settings: WurstSettings::default(),
