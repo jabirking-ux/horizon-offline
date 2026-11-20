@@ -216,7 +216,7 @@ impl Game<'_> {
             fluid_fog: self.pack.polytone_colors.fluid_fog,
         };
         let mut fog = horizon_client::fog::setup_fog(tables, &self.fog, &input);
-        if !self.settings.horizon.fog {
+        if !self.settings.horizon.fog || self.wurst.is_enabled(crate::wurst::HackId::NoFog) {
             horizon_client::fog::clear_distance_fog(&mut fog, &input);
         }
         if self.title.is_none() {
@@ -369,11 +369,15 @@ impl Game<'_> {
                     return None;
                 }
                 let overlay = e.camera_overlay?;
-                Some(
-                    overlay
-                        .strip_prefix("minecraft:")
-                        .map_or_else(|| overlay.clone(), str::to_owned),
-                )
+                let name = overlay
+                    .strip_prefix("minecraft:")
+                    .map_or_else(|| overlay.clone(), str::to_owned);
+                if self.wurst.is_enabled(crate::wurst::HackId::NoPumpkin)
+                    && name.contains("pumpkinblur")
+                {
+                    return None;
+                }
+                Some(name)
             })
             .collect(),
             ticks_frozen: p.ticks_frozen,
@@ -393,7 +397,7 @@ impl Game<'_> {
             partial,
             block_overlay,
             water,
-            on_fire: effects.on_fire,
+            on_fire: effects.on_fire && !self.wurst.is_enabled(crate::wurst::HackId::NoFireOverlay),
             fire_lower: self.pvp_fire_lower(),
             gui_overlays: &gui_overlays,
             custom: [&custom[0], &custom[1], &custom[2]],

@@ -18,7 +18,11 @@ impl Game<'_> {
         if self.remote.as_ref().is_some_and(|r| r.is_destroying) {
             return;
         }
-        self.use_delay = 4;
+        self.use_delay = if self.wurst.is_enabled(crate::wurst::HackId::FastPlace) {
+            0
+        } else {
+            4
+        };
         // Minecraft.startUseItem: nothing is used while the hands paddle a boat.
         if self.hands_busy() {
             return;

@@ -4609,7 +4609,11 @@ impl Game<'_> {
             && self.sleeping.is_none()
         {
             self.use_with_hand()?;
-            self.use_delay = 4;
+            self.use_delay = if self.wurst.is_enabled(crate::wurst::HackId::FastPlace) {
+                0
+            } else {
+                4
+            };
         }
         if running {
             horizon_client::spans::time("lan_note_joined", || self.lan_note_joined());
@@ -8210,6 +8214,7 @@ impl Game<'_> {
         let mut lines = self.fishing_line(alpha, size);
         let mut g = self.debug_gizmos(alpha as f32, camera.to_array());
         self.studio_camera_path(&mut g);
+        self.wurst_esp_gizmos(alpha as f32, camera.to_array(), &mut g);
         lines.extend(g.lines);
         let on_top = g.on_top;
         pr.lap("pr_debug");

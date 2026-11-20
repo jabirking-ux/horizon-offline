@@ -376,6 +376,9 @@ impl Game<'_> {
                 distance
             },
             |from, to| {
+                if self.wurst.is_enabled(crate::wurst::HackId::CameraNoClip) {
+                    return None;
+                }
                 let hit = clip_world(
                     &mut rays,
                     Vec3::new(from[0], from[1], from[2]),

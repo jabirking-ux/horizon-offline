@@ -68,6 +68,7 @@ impl Game<'_> {
         }
 
         self.hold_fullbright();
+        self.tick_wurst_combat();
 
         let jump_down = self.movement_key_held(KeyCode::Space);
         let shift_down = self.movement_key_held(KeyCode::ShiftLeft)
@@ -1998,6 +1999,122 @@ impl Game<'_> {
                 txt_color,
                 false,
             );
+        }
+    }
+
+    fn tick_wurst_combat(&mut self) {
+        if self.wurst.is_enabled(HackId::AutoRespawn) && self.screen == super::Screen::Dead {
+            let _ = self.respawn_player();
+        }
+        if self.wurst.is_enabled(HackId::Killaura)
+            && let Some(player) = self.player.as_ref()
+            && !player.health.dead_or_dying()
+        {
+            let range = self.wurst.settings.killaura_range;
+            let range_sq = range * range;
+            let eye = player.position + glam::DVec3::new(0.0, 1.62, 0.0);
+            let mut best: Option<(usize, u32, f64)> = None;
+            for (idx, m) in self.mobs.iter().enumerate() {
+                if m.removed || !m.alive() || Some(m.id) == self.remote_camera_id() {
+                    continue;
+                }
+                let d_sq = m.position.distance_squared(eye);
+                if d_sq <= range_sq && best.is_none_or(|(_, _, bd)| d_sq < bd) {
+                    best = Some((idx, m.id, d_sq));
+                }
+            }
+            if let Some((idx, id, d_sq)) = best {
+                let dist = d_sq.sqrt();
+                if self.remote.is_some() {
+                    if self.remote_attack_entity(id as i32, dist) {
+                        self.remote_swing_packet();
+                    }
+                } else {
+                    self.attack_mob(idx);
+                    self.swing_arm();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn wurst_esp_gizmos(
+        &self,
+        alpha: f32,
+        camera: [f64; 3],
+        g: &mut super::debug_keys::Gizmos,
+    ) {
+        let player_esp = self.wurst.is_enabled(HackId::PlayerESP);
+        let mob_esp = self.wurst.is_enabled(HackId::MobESP);
+        let item_esp = self.wurst.is_enabled(HackId::ItemESP);
+        let tracers = self.wurst.is_enabled(HackId::Tracers);
+        if !player_esp && !mob_esp && !item_esp && !tracers {
+            return;
+        }
+        let lerp = |a: f64, b: f64| a + f64::from(alpha) * (b - a);
+        let mut push_box = |min: [f32; 3], max: [f32; 3], color: [f32; 4]| {
+            let edges = [
+                ([min[0], min[1], min[2]], [max[0], min[1], min[2]]),
+                ([max[0], min[1], min[2]], [max[0], min[1], max[2]]),
+                ([max[0], min[1], max[2]], [min[0], min[1], max[2]]),
+                ([min[0], min[1], max[2]], [min[0], min[1], min[2]]),
+                ([min[0], max[1], min[2]], [max[0], max[1], min[2]]),
+                ([max[0], max[1], min[2]], [max[0], max[1], max[2]]),
+                ([max[0], max[1], max[2]], [min[0], max[1], max[2]]),
+                ([min[0], max[1], max[2]], [min[0], max[1], min[2]]),
+                ([min[0], min[1], min[2]], [min[0], max[1], min[2]]),
+                ([max[0], min[1], min[2]], [max[0], max[1], min[2]]),
+                ([max[0], min[1], max[2]], [max[0], max[1], max[2]]),
+                ([min[0], min[1], max[2]], [min[0], max[1], max[2]]),
+            ];
+            for (a, b) in edges {
+                g.on_top.push(horizon_client::render::Line {
+                    start: a,
+                    end: b,
+                    color,
+                });
+            }
+        };
+
+        for m in self.mobs.iter() {
+            if m.removed || !m.alive() || Some(m.id) == self.remote_camera_id() {
+                continue;
+            }
+            let is_player = m.kind.id == "minecraft:player";
+            if (is_player && !player_esp && !tracers) || (!is_player && !mob_esp) {
+                continue;
+            }
+            let x = (lerp(m.previous.x, m.position.x) - camera[0]) as f32;
+            let y = (lerp(m.previous.y, m.position.y) - camera[1]) as f32;
+            let z = (lerp(m.previous.z, m.position.z) - camera[2]) as f32;
+            let hw = m.width() * 0.5;
+            let h = m.height();
+            let color = if is_player {
+                [0.2, 1.0, 0.2, 1.0]
+            } else {
+                [1.0, 0.3, 0.3, 1.0]
+            };
+            if (is_player && player_esp) || (!is_player && mob_esp) {
+                push_box([x - hw, y, z - hw], [x + hw, y + h, z + hw], color);
+            }
+            if is_player && tracers {
+                g.on_top.push(horizon_client::render::Line {
+                    start: [0.0, 0.0, 0.0],
+                    end: [x, y + h * 0.5, z],
+                    color: [0.2, 1.0, 0.2, 0.85],
+                });
+            }
+        }
+        if item_esp {
+            for item in &self.dropped {
+                let x = (lerp(item.previous.x, item.position.x) - camera[0]) as f32;
+                let y = (lerp(item.previous.y, item.position.y) - camera[1]) as f32;
+                let z = (lerp(item.previous.z, item.position.z) - camera[2]) as f32;
+                push_box(
+                    [x - 0.15, y, z - 0.15],
+                    [x + 0.15, y + 0.3, z + 0.15],
+                    [1.0, 1.0, 0.2, 1.0],
+                );
+            }
         }
     }
 }

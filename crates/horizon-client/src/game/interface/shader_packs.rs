@@ -705,7 +705,9 @@ impl Game<'_> {
 
     /// Whether the game's vignette draws: the option, unless the loaded pack turns it off.
     pub(super) fn vignette_shown(&self) -> bool {
-        self.settings.vignette && self.pack_ids.as_ref().is_none_or(|ids| ids.vignette)
+        !self.wurst.is_enabled(crate::wurst::HackId::NoVignette)
+            && self.settings.vignette
+            && self.pack_ids.as_ref().is_none_or(|ids| ids.vignette)
     }
 
     /// `currentRenderedItemId` of a held `item`, [`rendered_item_id`]'s; 0 without a pack.

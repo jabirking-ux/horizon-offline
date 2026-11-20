@@ -148,6 +148,11 @@ impl Game<'_> {
     pub(super) fn update_interaction_ranges(&mut self) {
         self.entity_reach = self.interaction_range("minecraft:entity_interaction_range", 3.0, 5.0);
         self.block_reach = self.interaction_range("minecraft:block_interaction_range", 4.5, 5.0);
+        if self.wurst.is_enabled(crate::wurst::HackId::Reach) {
+            let reach = self.wurst.settings.reach_distance;
+            self.entity_reach = self.entity_reach.max(reach);
+            self.block_reach = self.block_reach.max(reach);
+        }
     }
 
     /// A stack's `minecraft:attack_range` component, falling back to the spear's
@@ -548,7 +553,12 @@ impl Game<'_> {
         if canceled {
             return 0.0;
         }
-        horizon_items::mining::destroy_progress(hardness, harvest, speed)
+        let progress = horizon_items::mining::destroy_progress(hardness, harvest, speed);
+        if self.wurst.is_enabled(crate::wurst::HackId::FastBreak) {
+            progress * self.wurst.settings.fastbreak_speed as f32
+        } else {
+            progress
+        }
     }
     /// `EntityFluidInteraction`: compare the eyes with the camera fluid surface.
     fn mining_eyes_in_water(&self) -> bool {

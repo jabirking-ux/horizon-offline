@@ -230,7 +230,11 @@ impl Game<'_> {
                 self.avatar.interpolated_bob(partial),
             )),
         };
-        let tilt = self.settings.file.double("damageTiltStrength");
+        let tilt = if self.wurst.is_enabled(crate::wurst::HackId::NoHurtcam) {
+            0.0
+        } else {
+            self.settings.file.double("damageTiltStrength")
+        };
         glam::Mat4::from_cols_array(&bob_matrix(&state, tilt, self.settings.view_bobbing).m)
             * self.native_shake_matrix(partial)
     }
