@@ -2010,13 +2010,7 @@ impl Game<'_> {
         if self.wurst.is_enabled(HackId::AutoRespawn) && self.screen == super::Screen::Dead {
             let _ = self.respawn_player();
         }
-        if self.wurst.is_enabled(HackId::AutoJump)
-            && let Some(p) = self.player.as_mut()
-            && p.ground.on_ground
-        {
-            p.velocity.y = 0.42;
-        }
-        if self.wurst.is_enabled(HackId::AntiAFK) && (self.tick_count % 100 == 0) {
+        if self.wurst.is_enabled(HackId::AntiAFK) && (self.potions.effects.tick_count % 100 == 0) {
             self.yaw = (self.yaw + 0.5) % 360.0;
         }
         if self.wurst.is_enabled(HackId::AutoArmor) {
@@ -2042,18 +2036,18 @@ impl Game<'_> {
                     s.as_ref()
                         .is_some_and(|st| st.item.contains("totem_of_undying"))
                 }) {
-                    self.selected = slot;
                     if self.remote.is_some() {
+                        self.selected = slot;
                         self.remote_swap_hands();
                     } else {
-                        self.own_swap_hands();
+                        std::mem::swap(&mut self.offhand, &mut self.inventory[slot]);
                     }
                 }
             }
         }
         if self.wurst.is_enabled(HackId::TriggerBot)
             && !self.wurst.is_enabled(HackId::Killaura)
-            && let Some((idx, dist)) = self.mob_hit_within(self.entity_reach)
+            && let Some((idx, dist, _)) = self.mob_hit_within(self.entity_reach)
         {
             let id = self.mobs[idx].id;
             if self.wurst.is_enabled(HackId::Criticals)
@@ -2077,13 +2071,17 @@ impl Game<'_> {
                 .is_some_and(|s| s.item.contains("bow") || s.item.contains("crossbow"))
             && let Some(player) = self.player.as_ref()
         {
-            let eye = player.position + glam::DVec3::new(0.0, 1.62, 0.0);
+            let eye = glam::DVec3::new(player.position.x, player.position.y + 1.62, player.position.z);
             let mut best: Option<(glam::DVec3, f64)> = None;
             for m in self.mobs.iter() {
                 if m.removed || !m.alive() || Some(m.id) == self.remote_camera_id() {
                     continue;
                 }
-                let target = m.position + glam::DVec3::new(0.0, f64::from(m.height()) * 0.5, 0.0);
+                let target = glam::DVec3::new(
+                    m.position.x,
+                    m.position.y + f64::from(m.height()) * 0.5,
+                    m.position.z,
+                );
                 let d_sq = target.distance_squared(eye);
                 if d_sq <= 48.0 * 48.0 && best.is_none_or(|(_, bd)| d_sq < bd) {
                     best = Some((target, d_sq));
@@ -2102,7 +2100,11 @@ impl Game<'_> {
         {
             let range = self.wurst.settings.killaura_range;
             let range_sq = range * range;
-            let eye = player.position + glam::DVec3::new(0.0, 1.62, 0.0);
+            let eye = horizon_core::geometry::Vec3::new(
+                player.position.x,
+                player.position.y + 1.62,
+                player.position.z,
+            );
             let mut best: Option<(usize, u32, f64)> = None;
             for (idx, m) in self.mobs.iter().enumerate() {
                 if m.removed || !m.alive() || Some(m.id) == self.remote_camera_id() {
@@ -2137,7 +2139,7 @@ impl Game<'_> {
         &self,
         alpha: f32,
         camera: [f64; 3],
-        g: &mut super::debug_keys::Gizmos,
+        g: &mut horizon_client_lib::gizmos::Gizmos,
     ) {
         let player_esp = self.wurst.is_enabled(HackId::PlayerESP);
         let mob_esp = self.wurst.is_enabled(HackId::MobESP);
@@ -2145,8 +2147,7 @@ impl Game<'_> {
         let chest_esp = self.wurst.is_enabled(HackId::ChestESP);
         let base_finder = self.wurst.is_enabled(HackId::BaseFinder);
         let xray = self.wurst.is_enabled(HackId::XRay);
-        let tracers = self.wurst.is_enabled(HackId::Tracers);
-        if !player_esp && !mob_esp && !item_esp && !chest_esp && !base_finder && !xray && !tracers {
+        if !player_esp && !mob_esp && !item_esp && !chest_esp && !base_finder && !xray {
             return;
         }
         let lerp = |a: f64, b: f64| a + f64::from(alpha) * (b - a);
@@ -2166,7 +2167,7 @@ impl Game<'_> {
                 ([min[0], min[1], max[2]], [min[0], max[1], max[2]]),
             ];
             for (a, b) in edges {
-                g.on_top.push(horizon_client::render::Line {
+                g.on_top.push(horizon_client_render::Line {
                     start: a,
                     end: b,
                     color,
@@ -2179,7 +2180,7 @@ impl Game<'_> {
                 continue;
             }
             let is_player = m.kind.id == "minecraft:player";
-            if (is_player && !player_esp && !tracers) || (!is_player && !mob_esp) {
+            if (is_player && !player_esp) || (!is_player && !mob_esp) {
                 continue;
             }
             let x = (lerp(m.previous.x, m.position.x) - camera[0]) as f32;
@@ -2192,16 +2193,7 @@ impl Game<'_> {
             } else {
                 [1.0, 0.3, 0.3, 1.0]
             };
-            if (is_player && player_esp) || (!is_player && mob_esp) {
-                push_box([x - hw, y, z - hw], [x + hw, y + h, z + hw], color);
-            }
-            if is_player && tracers {
-                g.on_top.push(horizon_client::render::Line {
-                    start: [0.0, 0.0, 0.0],
-                    end: [x, y + h * 0.5, z],
-                    color: [0.2, 1.0, 0.2, 0.85],
-                });
-            }
+            push_box([x - hw, y, z - hw], [x + hw, y + h, z + hw], color);
         }
         if item_esp {
             for item in &self.dropped {
