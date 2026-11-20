@@ -1197,33 +1197,6 @@ impl Game<'_> {
         let [mx, my] = self.wurst.gui_cursor;
         let title_h = 13.0_f32;
         let row_step = 13.0_f32;
-
-        // Check SettingsWindow popup first (top-most)
-        if let Some((sid, sx, sy)) = self.wurst.settings_popup {
-            let sw = 140.0_f32;
-            let items = Self::hack_settings(sid);
-            let sh = title_h + 2.0 + (items.len().max(1) as f32) * row_step;
-            if mx >= sx && mx <= sx + sw && my >= sy && my <= sy + sh {
-                if my <= sy + title_h {
-                    // Red X close button at [sx + sw - 11 .. sx + sw - 2]
-                    if button == MouseButton::Left && mx >= sx + sw - 11.0 {
-                        self.wurst.settings_popup = None;
-                        self.audio.play_button_click();
-                    }
-                    return true;
-                }
-                let rel_y = my - (sy + title_h + 2.0);
-                if rel_y >= 0.0 {
-                    let row = (rel_y / row_step) as usize;
-                    if let Some(&ui_id) = items.get(row) {
-                        let delta = if button == MouseButton::Right { -1.0 } else { 1.0 };
-                        self.step_ui_setting(ui_id, delta);
-                        self.audio.play_button_click();
-                    }
-                }
-                return true;
-            }
-        }
         let mut tooltip: Option<&'static str> = None;
 
         for win in &self.wurst.gui_windows {
