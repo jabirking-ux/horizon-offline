@@ -2006,6 +2006,45 @@ impl Game<'_> {
         if self.wurst.is_enabled(HackId::AutoRespawn) && self.screen == super::Screen::Dead {
             let _ = self.respawn_player();
         }
+        if self.wurst.is_enabled(HackId::AutoTotem) {
+            let has_totem = self
+                .offhand
+                .as_ref()
+                .is_some_and(|s| s.item.contains("totem_of_undying"));
+            if !has_totem {
+                if let Some(slot) = self.inventory.iter().take(9).position(|s| {
+                    s.as_ref()
+                        .is_some_and(|st| st.item.contains("totem_of_undying"))
+                }) {
+                    self.selected = slot;
+                    if self.remote.is_some() {
+                        self.remote_swap_hands();
+                    } else {
+                        self.own_swap_hands();
+                    }
+                }
+            }
+        }
+        if self.wurst.is_enabled(HackId::TriggerBot)
+            && !self.wurst.is_enabled(HackId::Killaura)
+            && let Some((idx, dist)) = self.mob_hit_within(self.entity_reach)
+        {
+            let id = self.mobs[idx].id;
+            if self.wurst.is_enabled(HackId::Criticals)
+                && let Some(p) = self.player.as_mut()
+                && p.ground.on_ground
+            {
+                p.velocity.y = 0.1;
+            }
+            if self.remote.is_some() {
+                if self.remote_attack_entity(id as i32, dist) {
+                    self.remote_swing_packet();
+                }
+            } else {
+                self.attack_mob(idx);
+                self.swing_arm();
+            }
+        }
         if self.wurst.is_enabled(HackId::Killaura)
             && let Some(player) = self.player.as_ref()
             && !player.health.dead_or_dying()
@@ -2024,6 +2063,12 @@ impl Game<'_> {
                 }
             }
             if let Some((idx, id, d_sq)) = best {
+                if self.wurst.is_enabled(HackId::Criticals)
+                    && let Some(p) = self.player.as_mut()
+                    && p.ground.on_ground
+                {
+                    p.velocity.y = 0.1;
+                }
                 let dist = d_sq.sqrt();
                 if self.remote.is_some() {
                     if self.remote_attack_entity(id as i32, dist) {
