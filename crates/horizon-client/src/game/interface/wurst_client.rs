@@ -402,9 +402,50 @@ impl Game<'_> {
             return false;
         }
         if key == KeyCode::ShiftRight {
+            self.wurst.navigator_open = !self.wurst.navigator_open;
+            self.wurst.menu_open = false;
+            self.wurst.gui_dragging = None;
+            if self.wurst.navigator_open {
+                self.wurst.navigator_query.clear();
+                self.wurst.navigator_scroll = 0;
+            }
+            self.capture(!self.wurst.navigator_open);
+            return true;
+        }
+        if key == KeyCode::ControlRight {
             self.wurst.menu_open = !self.wurst.menu_open;
+            self.wurst.navigator_open = false;
             self.wurst.gui_dragging = None;
             self.capture(!self.wurst.menu_open);
+            return true;
+        }
+        if self.wurst.navigator_open {
+            match key {
+                KeyCode::Escape => {
+                    self.wurst.navigator_open = false;
+                    self.capture(true);
+                }
+                KeyCode::Backspace => {
+                    self.wurst.navigator_query.pop();
+                    self.wurst.navigator_scroll = 0;
+                }
+                KeyCode::Space => {
+                    self.wurst.navigator_query.push(' ');
+                    self.wurst.navigator_scroll = 0;
+                }
+                KeyCode::ArrowDown => {
+                    self.wurst.navigator_scroll = self.wurst.navigator_scroll.saturating_add(1);
+                }
+                KeyCode::ArrowUp => {
+                    self.wurst.navigator_scroll = self.wurst.navigator_scroll.saturating_sub(1);
+                }
+                _ => {
+                    if let Some(ch) = keycode_name(key) {
+                        self.wurst.navigator_query.push_str(&ch.to_ascii_lowercase());
+                        self.wurst.navigator_scroll = 0;
+                    }
+                }
+            }
             return true;
         }
         if self.wurst.menu_open {
@@ -480,7 +521,18 @@ impl Game<'_> {
     }
 
     pub(super) fn handle_wurst_scroll(&mut self, delta: f32) -> bool {
-        if !self.wurst.active || !self.wurst.menu_open {
+        if !self.wurst.active {
+            return false;
+        }
+        if self.wurst.navigator_open {
+            if delta < 0.0 {
+                self.wurst.navigator_scroll = self.wurst.navigator_scroll.saturating_add(1);
+            } else if delta > 0.0 {
+                self.wurst.navigator_scroll = self.wurst.navigator_scroll.saturating_sub(1);
+            }
+            return true;
+        }
+        if !self.wurst.menu_open {
             return false;
         }
         let [mx, my] = self.wurst.gui_cursor;
@@ -628,6 +680,12 @@ impl Game<'_> {
         if self.wurst.wurst_options_open {
             if pressed && button == MouseButton::Left {
                 self.click_wurst_options();
+            }
+            return true;
+        }
+        if self.wurst.navigator_open {
+            if pressed && button == MouseButton::Left {
+                self.click_navigator();
             }
             return true;
         }
@@ -1071,13 +1129,116 @@ impl Game<'_> {
         draw_btn(batch, mx - 100.0, h * 0.25 + 128.0, 200.0, "Back");
     }
 
-    /// Draws Wurst7's `WurstLogo`, `TabGui`, `HackListHUD`, `ClickGui`, and `WurstOptionsScreen`.
+    fn navigator_filtered(&self) -> Vec<HackId> {
+        let q = self.wurst.navigator_query.trim().to_ascii_lowercase();
+        HackId::ALL
+            .iter()
+            .copied()
+            .filter(|id| {
+                q.is_empty()
+                    || id.name().to_ascii_lowercase().contains(&q)
+                    || id.category().name().to_ascii_lowercase().contains(&q)
+                    || id.description().to_ascii_lowercase().contains(&q)
+            })
+            .collect()
+    }
+
+    fn click_navigator(&mut self) {
+        let (w, _h) = self.gui_size();
+        let cur = self.cursor;
+        let mx = w * 0.5;
+        let top_y = 60.0_f32;
+        let cols = 3usize;
+        let col_w = 104.0_f32;
+        let row_h = 26.0_f32;
+        let grid_w = (cols as f32) * col_w + 8.0;
+        let gx = mx - grid_w * 0.5;
+        let items = self.navigator_filtered();
+        let start = self.wurst.navigator_scroll * cols;
+        for (vi, &id) in items.iter().skip(start).take(18).enumerate() {
+            let r = vi / cols;
+            let c = vi % cols;
+            let bx = gx + (c as f32) * (col_w + 4.0);
+            let by = top_y + (r as f32) * (row_h + 4.0);
+            if horizon_client::ui::hovered(cur, bx, by, col_w, row_h) {
+                self.wurst.toggle(id);
+                self.audio.play_button_click();
+                return;
+            }
+        }
+    }
+
+    fn draw_navigator_screen(&self, batch: &mut HudBatch) {
+        let atlas = &self.gui.atlas;
+        let (w, h) = (batch.width, batch.height);
+        let cur = self.cursor;
+        let mx = w * 0.5;
+
+        // Dimmed backdrop + search bar (NavigatorMainScreen.java)
+        batch.fill(atlas, 0.0, 0.0, w, h, rgba(0, 0, 0, 140));
+        let bar_w = 220.0_f32;
+        let bar_x = mx - bar_w * 0.5;
+        let bar_y = 32.0_f32;
+        batch.fill(atlas, bar_x, bar_y, bar_w, 16.0, rgba(32, 32, 32, 220));
+        Self::draw_border_2d(batch, atlas, bar_x, bar_y, bar_x + bar_w, bar_y + 16.0, rgba(0, 200, 0, 200));
+        let search_txt = if self.wurst.navigator_query.is_empty() {
+            "Search Wurst hacks... (Type to filter, Esc=Close, RCtrl=ClickGUI)".to_owned()
+        } else {
+            self.wurst.navigator_query.clone()
+        };
+        batch.text_styled(
+            atlas,
+            &Text::literal(search_txt),
+            bar_x + 4.0,
+            bar_y + 4.0,
+            if self.wurst.navigator_query.is_empty() {
+                rgba(160, 160, 160, 255)
+            } else {
+                rgba(255, 255, 255, 255)
+            },
+            false,
+        );
+
+        let top_y = 60.0_f32;
+        let cols = 3usize;
+        let col_w = 104.0_f32;
+        let row_h = 26.0_f32;
+        let grid_w = (cols as f32) * col_w + 8.0;
+        let gx = mx - grid_w * 0.5;
+        let items = self.navigator_filtered();
+        let start = self.wurst.navigator_scroll * cols;
+
+        for (vi, &id) in items.iter().skip(start).take(18).enumerate() {
+            let r = vi / cols;
+            let c = vi % cols;
+            let bx = gx + (c as f32) * (col_w + 4.0);
+            let by = top_y + (r as f32) * (row_h + 4.0);
+            let hov = horizon_client::ui::hovered(cur, bx, by, col_w, row_h);
+            let on = self.wurst.is_enabled(id);
+            let bg = match (on, hov) {
+                (true, true) => rgba(0, 220, 0, 190),
+                (true, false) => rgba(0, 180, 0, 150),
+                (false, true) => rgba(80, 80, 80, 190),
+                (false, false) => rgba(48, 48, 48, 160),
+            };
+            batch.fill(atlas, bx, by, col_w, row_h, bg);
+            Self::draw_border_2d(batch, atlas, bx, by, bx + col_w, by + row_h, rgba(16, 16, 16, 180));
+            batch.text_styled(atlas, &Text::literal(id.name()), bx + 4.0, by + 4.0, rgba(255, 255, 255, 255), false);
+            batch.text_styled(atlas, &Text::literal(id.category().name()), bx + 4.0, by + 15.0, rgba(180, 180, 180, 255), false);
+        }
+    }
+
+    /// Draws Wurst7's `WurstLogo`, `TabGui`, `HackListHUD`, `ClickGui`, `Navigator`, and `WurstOptionsScreen`.
     pub(super) fn draw_wurst_hud(&self, batch: &mut HudBatch) {
         if !self.wurst.active {
             return;
         }
         if self.wurst.wurst_options_open {
             self.draw_wurst_options_screen(batch);
+            return;
+        }
+        if self.wurst.navigator_open {
+            self.draw_navigator_screen(batch);
             return;
         }
 

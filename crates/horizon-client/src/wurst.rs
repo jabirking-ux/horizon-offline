@@ -455,6 +455,9 @@ impl UiSettingId {
 pub struct WurstClient {
     pub active: bool,
     pub menu_open: bool,
+    pub navigator_open: bool,
+    pub navigator_query: String,
+    pub navigator_scroll: usize,
     pub wurst_options_open: bool,
     pub wurst_options_from_pause: bool,
     pub menu_selected: usize,
@@ -502,6 +505,9 @@ impl WurstClient {
         let mut client = Self {
             active,
             menu_open: false,
+            navigator_open: false,
+            navigator_query: String::new(),
+            navigator_scroll: 0,
             wurst_options_open: false,
             wurst_options_from_pause: false,
             menu_selected: 0,

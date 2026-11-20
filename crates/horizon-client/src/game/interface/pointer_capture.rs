@@ -165,6 +165,7 @@ impl Game<'_> {
                 || self.dialog_open()
                 || self.command_prompt.is_some()
                 || self.wurst.menu_open
+                || self.wurst.navigator_open
                 || self.wurst.wurst_options_open,
         }) {
             return;
