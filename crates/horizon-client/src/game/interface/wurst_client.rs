@@ -1,8 +1,9 @@
-//! Connects the native Rust Wurst Client (`horizon_client::wurst`) into `Game`:
-//! per-tick hack execution, `.command` chat interception, keybinds, and HUD/ClickGUI rendering.
+//! 1:1 port of Wurst7's `WurstLogo`, `TabGui`, `HackListHUD`, `ClickGui` (`Window`,
+//! `ClickGuiIcons`, `FeatureButton`), and `WurstOptionsScreen` for `horizon-client`.
 use super::*;
+use horizon_client::hud::rgba;
 use horizon_client::text::Text;
-use horizon_client::wurst::{Category, CommandAction, HackId, UiSettingId};
+use horizon_client::wurst::{Category, CommandAction, HackId, UiSettingId, WURST_LOGO_RLE};
 
 fn keycode_name(key: KeyCode) -> Option<&'static str> {
     Some(match key {
@@ -36,20 +37,43 @@ fn keycode_name(key: KeyCode) -> Option<&'static str> {
     })
 }
 
+const MAX_INNER_HEIGHT: f32 = 200.0;
+
 impl Game<'_> {
+    /// Renders `wurst_128.png` (`72x18` base RLE) at `(x, y)` scaled by `(sx, sy)`.
+    pub(super) fn draw_wurst_logo(
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        x: f32,
+        y: f32,
+        sx: f32,
+        sy: f32,
+    ) {
+        for &(px, py, pw, color) in WURST_LOGO_RLE {
+            batch.fill(
+                atlas,
+                x + (px as f32) * sx,
+                y + (py as f32) * sy,
+                (pw as f32) * sx,
+                sy,
+                color,
+            );
+        }
+    }
+
     /// Runs every client tick when Wurst is active in this Horizon instance.
     pub(super) fn tick_wurst(&mut self) {
         if !self.wurst.active || self.title.is_some() {
             return;
         }
 
-        // Fullbright (FullbrightHack.java)
         self.hold_fullbright();
 
         let jump_down = self.movement_key_held(KeyCode::Space);
         let shift_down = self.movement_key_held(KeyCode::ShiftLeft)
             || self.movement_key_held(KeyCode::ShiftRight);
-        let forward_down = self.movement_key_held(KeyCode::KeyW);
+        let forward_down = self.movement_key_held(KeyCode::KeyW)
+            || self.wurst.is_enabled(HackId::AutoWalk);
         let back_down = self.movement_key_held(KeyCode::KeyS);
         let left_down = self.movement_key_held(KeyCode::KeyA);
         let right_down = self.movement_key_held(KeyCode::KeyD);
@@ -90,7 +114,6 @@ impl Game<'_> {
             return;
         };
 
-        // CreativeFlightHack.java
         if self.wurst.is_enabled(HackId::CreativeFlight) {
             if self.wurst.cfly_was_may_fly.is_none() {
                 self.wurst.cfly_was_may_fly = Some(player.may_fly);
@@ -103,8 +126,7 @@ impl Game<'_> {
             }
         }
 
-        // NoClipHack.java
-        if self.wurst.is_enabled(HackId::NoClip) {
+        if self.wurst.is_enabled(HackId::NoClip) || self.wurst.is_enabled(HackId::Freecam) {
             if self.wurst.noclip_was_spectator.is_none() {
                 self.wurst.noclip_was_spectator = Some(player.spectator);
             }
@@ -114,8 +136,7 @@ impl Game<'_> {
             player.spectator = prev;
         }
 
-        // FlightHack.java: zero delta movement + horizontal/vertical speed + anti-kick
-        if self.wurst.is_enabled(HackId::Flight) {
+        if self.wurst.is_enabled(HackId::Flight) || self.wurst.is_enabled(HackId::BoatFly) {
             player.flying = false;
             let h_speed = self.wurst.settings.flight_horizontal_speed;
             let v_speed = self.wurst.flight_actual_vertical_speed(player.invulnerable);
@@ -152,18 +173,15 @@ impl Game<'_> {
             }
         }
 
-        // JetpackHack.java
         if self.wurst.is_enabled(HackId::Jetpack) && jump_down {
             player.velocity.y = 0.42;
         }
 
-        // AirJumpHack.java
         if self.wurst.is_enabled(HackId::AirJump) && jump_just_pressed && !player.ground.on_ground {
             player.velocity.y = 0.42 + self.wurst.highjump_added_power();
             player.fall_distance = 0.0;
         }
 
-        // HighJumpHack.java
         if self.wurst.is_enabled(HackId::HighJump) && jump_just_pressed && player.ground.on_ground {
             let added = self.wurst.highjump_added_power();
             if added > 0.0 {
@@ -171,7 +189,6 @@ impl Game<'_> {
             }
         }
 
-        // AutoSprintHack.java
         if self.wurst.is_enabled(HackId::AutoSprint)
             && !player.collision.horizontal
             && !shift_down
@@ -182,14 +199,22 @@ impl Game<'_> {
             player.sprinting = true;
         }
 
-        // NoFallHack.java
+        if self.wurst.is_enabled(HackId::AutoSwim) && player.fluids.was_touching_water && forward_down {
+            player.swimming = true;
+            player.sprinting = true;
+        }
+
+        if self.wurst.is_enabled(HackId::Sneak) {
+            player.local_crouching = true;
+            player.shift_key_down = true;
+        }
+
         if self.wurst.is_enabled(HackId::NoFall)
             && player.fall_distance >= self.wurst.settings.nofall_min_fall_distance
         {
             player.fall_distance = 0.0;
         }
 
-        // SpiderHack.java
         if self.wurst.is_enabled(HackId::Spider)
             && player.collision.horizontal
             && player.velocity.y < 0.2
@@ -197,7 +222,14 @@ impl Game<'_> {
             player.velocity.y = 0.2;
         }
 
-        // GlideHack.java
+        if self.wurst.is_enabled(HackId::FastLadder)
+            && player.on_climbable
+            && player.collision.horizontal
+            && moving
+        {
+            player.velocity.y = 0.2872;
+        }
+
         if self.wurst.is_enabled(HackId::Glide)
             && !player.ground.on_ground
             && player.velocity.y < -self.wurst.settings.glide_fall_speed
@@ -211,7 +243,6 @@ impl Game<'_> {
             }
         }
 
-        // SpeedHackHack.java
         if self.wurst.is_enabled(HackId::SpeedHack)
             && !self.wurst.is_enabled(HackId::Flight)
             && moving
@@ -226,7 +257,6 @@ impl Game<'_> {
             }
         }
 
-        // BunnyHopHack.java
         if self.wurst.is_enabled(HackId::BunnyHop)
             && moving
             && player.ground.on_ground
@@ -235,8 +265,7 @@ impl Game<'_> {
             player.velocity.y = 0.42 + self.wurst.highjump_added_power();
         }
 
-        // DolphinHack.java
-        if self.wurst.is_enabled(HackId::Dolphin)
+        if (self.wurst.is_enabled(HackId::Dolphin) || self.wurst.is_enabled(HackId::Fish))
             && player.fluids.was_touching_water
             && !shift_down
             && player.velocity.y < 0.15
@@ -244,7 +273,6 @@ impl Game<'_> {
             player.velocity.y += 0.04;
         }
 
-        // JesusHack.java
         if self.wurst.is_enabled(HackId::Jesus)
             && (player.fluids.was_touching_water || player.fluids.was_eye_in_water)
             && !shift_down
@@ -256,19 +284,20 @@ impl Game<'_> {
             player.fall_distance = 0.0;
         }
 
-        // NoSlowdownHack.java
-        if self.wurst.is_enabled(HackId::NoSlowdown) {
+        if self.wurst.is_enabled(HackId::NoSlowdown) || self.wurst.is_enabled(HackId::NoWeb) {
             player.item_use_speed = None;
             player.item_use_slows_sprint = false;
             player.stuck_multiplier = Vec3::ZERO;
         }
 
-        // AntiBlindHack.java
+        if self.wurst.is_enabled(HackId::SnowShoe) {
+            player.leather_boots = true;
+        }
+
         if self.wurst.is_enabled(HackId::AntiBlind) {
             player.mobility_restricted = false;
         }
 
-        // StepHack.java: lift cleanly onto 1-block ledges on horizontal collision while grounded
         if self.wurst.is_enabled(HackId::Step)
             && player.collision.horizontal
             && player.ground.on_ground
@@ -277,12 +306,10 @@ impl Game<'_> {
             player.position.y += self.wurst.settings.step_height.min(1.0);
         }
 
-        // SafeWalkHack.java: mimic sneak-edge clamping while walking on ground
         if self.wurst.is_enabled(HackId::SafeWalk) && player.ground.on_ground && !shift_down {
             player.local_crouching = true;
         }
 
-        // ParkourHack.java: auto-jump if moving forward near a drop
         if self.wurst.is_enabled(HackId::Parkour)
             && player.ground.on_ground
             && moving
@@ -298,7 +325,6 @@ impl Game<'_> {
         }
     }
 
-    /// Handles a `.`-prefixed Wurst chat command. Returns `true` if consumed.
     pub(super) fn handle_wurst_command(&mut self, message: &str) -> bool {
         if !self.wurst.active || !message.starts_with('.') {
             return false;
@@ -356,10 +382,19 @@ impl Game<'_> {
         true
     }
 
-    /// Handles Wurst keybinds and the Right-Shift ClickGUI when playing.
-    /// Returns `true` if the key was consumed by the Wurst menu.
     pub(super) fn handle_wurst_key(&mut self, key: KeyCode) -> bool {
-        if !self.wurst.active || self.title.is_some() || self.screen != Screen::Playing {
+        if !self.wurst.active || self.title.is_some() {
+            return false;
+        }
+        if self.wurst.wurst_options_open {
+            if key == KeyCode::Escape {
+                self.wurst.wurst_options_open = false;
+                self.set_screen(Screen::Paused);
+                return true;
+            }
+            return true;
+        }
+        if self.screen != Screen::Playing {
             return false;
         }
         if key == KeyCode::ShiftRight {
@@ -377,7 +412,6 @@ impl Game<'_> {
             }
             return true;
         }
-        // TabGui.java arrow key navigation
         if self.wurst.settings.show_tabgui {
             let cats = Category::ALL;
             match key {
@@ -393,11 +427,13 @@ impl Game<'_> {
                 }
                 KeyCode::ArrowUp => {
                     if !self.wurst.tab_opened {
-                        self.wurst.tab_selected = (self.wurst.tab_selected + cats.len() - 1) % cats.len();
+                        self.wurst.tab_selected =
+                            (self.wurst.tab_selected + cats.len() - 1) % cats.len();
                         self.wurst.tab_feature_selected = 0;
                     } else {
                         let n = Self::window_hacks(cats[self.wurst.tab_selected]).len().max(1);
-                        self.wurst.tab_feature_selected = (self.wurst.tab_feature_selected + n - 1) % n;
+                        self.wurst.tab_feature_selected =
+                            (self.wurst.tab_feature_selected + n - 1) % n;
                     }
                     return true;
                 }
@@ -423,15 +459,7 @@ impl Game<'_> {
         if let Some(name) = keycode_name(key)
             && let Some(&id) = self.wurst.binds.get(name)
         {
-            let on = self.wurst.toggle(id);
-            self.system_message(
-                Text::literal(format!(
-                    "[Wurst] {} {}",
-                    id.name(),
-                    if on { "ON" } else { "OFF" }
-                ))
-                .with_color(if on { 0x55_FF55 } else { 0xAA_AAAA }),
-            );
+            self.wurst.toggle(id);
             return true;
         }
         false
@@ -447,6 +475,31 @@ impl Game<'_> {
         }
     }
 
+    pub(super) fn handle_wurst_scroll(&mut self, delta: f32) -> bool {
+        if !self.wurst.active || !self.wurst.menu_open {
+            return false;
+        }
+        let [mx, my] = self.wurst.gui_cursor;
+        for idx in (0..self.wurst.gui_windows.len()).rev() {
+            let win = &mut self.wurst.gui_windows[idx];
+            if win.minimized || mx < win.x || mx > win.x + win.width || my < win.y + 13.0 {
+                continue;
+            }
+            let count = match win.category {
+                Some(cat) => Self::window_hacks(cat).len(),
+                None => UiSettingId::ALL.len(),
+            };
+            let inner_h = 2.0 + (count as f32) * 13.0;
+            let outer_h = inner_h.min(MAX_INNER_HEIGHT);
+            if my <= win.y + 13.0 + outer_h && inner_h > MAX_INNER_HEIGHT {
+                let min_scroll = -(inner_h - MAX_INNER_HEIGHT);
+                win.scroll = (win.scroll + delta * 15.0).clamp(min_scroll, 0.0);
+                return true;
+            }
+        }
+        false
+    }
+
     fn window_hacks(cat: Category) -> Vec<HackId> {
         HackId::ALL
             .iter()
@@ -457,28 +510,18 @@ impl Game<'_> {
 
     fn ui_setting_label(&self, s: UiSettingId) -> String {
         match s {
-            UiSettingId::WurstLogo => format!(
-                "WurstLogo: {}",
-                if self.wurst.settings.show_watermark { "ON" } else { "OFF" }
-            ),
-            UiSettingId::HackList => format!(
-                "HackList: {}",
-                if self.wurst.settings.show_hacklist { "ON" } else { "OFF" }
-            ),
-            UiSettingId::TabGui => format!(
-                "TabGUI: {}",
-                if self.wurst.settings.show_tabgui { "ON" } else { "OFF" }
-            ),
+            UiSettingId::WurstLogo => "WurstLogo".to_owned(),
+            UiSettingId::HackList => "HackList".to_owned(),
+            UiSettingId::TabGui => "TabGui".to_owned(),
+            UiSettingId::KeybindManager => "KeybindManager".to_owned(),
+            UiSettingId::WurstOptions => "WurstOptions".to_owned(),
             UiSettingId::FlightHSpeed => {
                 format!("Flight H: {:.2}", self.wurst.settings.flight_horizontal_speed)
             }
             UiSettingId::FlightVSpeed => {
                 format!("Flight V: {:.2}", self.wurst.settings.flight_vertical_speed)
             }
-            UiSettingId::FlightAntiKick => format!(
-                "Anti-Kick: {}",
-                if self.wurst.settings.flight_anti_kick { "ON" } else { "OFF" }
-            ),
+            UiSettingId::FlightAntiKick => "Flight Anti-Kick".to_owned(),
             UiSettingId::SpeedMultiplier => {
                 format!("Speed: {:.2}x", self.wurst.settings.speed_multiplier)
             }
@@ -518,43 +561,72 @@ impl Game<'_> {
             UiSettingId::TabGui => {
                 self.wurst.settings.show_tabgui = !self.wurst.settings.show_tabgui;
             }
+            UiSettingId::KeybindManager => {
+                let actions = self.wurst.run_command(".binds list");
+                for a in actions {
+                    if let CommandAction::Message(m) = a {
+                        self.system_message(Text::literal(m).with_color(0x55_FF55));
+                    }
+                }
+            }
+            UiSettingId::WurstOptions => {
+                self.wurst.menu_open = false;
+                self.wurst.wurst_options_open = true;
+                self.capture(false);
+            }
             UiSettingId::FlightHSpeed => {
                 let v = self.wurst.settings.flight_horizontal_speed + delta * 0.25;
-                self.wurst.settings.flight_horizontal_speed = if v > 10.0 { 0.25 } else { v.clamp(0.05, 10.0) };
+                self.wurst.settings.flight_horizontal_speed =
+                    if v > 10.0 { 0.25 } else { v.clamp(0.05, 10.0) };
             }
             UiSettingId::FlightVSpeed => {
                 let v = self.wurst.settings.flight_vertical_speed + delta * 0.25;
-                self.wurst.settings.flight_vertical_speed = if v > 5.0 { 0.25 } else { v.clamp(0.05, 5.0) };
+                self.wurst.settings.flight_vertical_speed =
+                    if v > 5.0 { 0.25 } else { v.clamp(0.05, 5.0) };
             }
             UiSettingId::FlightAntiKick => {
                 self.wurst.settings.flight_anti_kick = !self.wurst.settings.flight_anti_kick;
             }
             UiSettingId::SpeedMultiplier => {
                 let v = self.wurst.settings.speed_multiplier + delta * 0.25;
-                self.wurst.settings.speed_multiplier = if v > 5.0 { 1.0 } else { v.clamp(1.0, 5.0) };
+                self.wurst.settings.speed_multiplier =
+                    if v > 5.0 { 1.0 } else { v.clamp(1.0, 5.0) };
             }
             UiSettingId::HighJumpHeight => {
                 let v = self.wurst.settings.highjump_height + delta * 1.0;
-                self.wurst.settings.highjump_height = if v > 20.0 { 1.0 } else { v.clamp(1.0, 100.0) };
+                self.wurst.settings.highjump_height =
+                    if v > 20.0 { 1.0 } else { v.clamp(1.0, 100.0) };
             }
             UiSettingId::StepHeight => {
                 let v = self.wurst.settings.step_height + delta * 0.5;
-                self.wurst.settings.step_height = if v > 3.0 { 0.5 } else { v.clamp(0.5, 10.0) };
+                self.wurst.settings.step_height =
+                    if v > 3.0 { 0.5 } else { v.clamp(0.5, 10.0) };
             }
             UiSettingId::TimerSpeed => {
                 let v = self.wurst.settings.timer_speed + delta * 0.25;
-                self.wurst.settings.timer_speed = if v > 5.0 { 0.5 } else { v.clamp(0.1, 10.0) };
+                self.wurst.settings.timer_speed =
+                    if v > 5.0 { 0.5 } else { v.clamp(0.1, 10.0) };
             }
             UiSettingId::GlideFallSpeed => {
                 let v = self.wurst.settings.glide_fall_speed + delta * 0.025;
-                self.wurst.settings.glide_fall_speed = if v > 0.25 { 0.025 } else { v.clamp(0.005, 0.25) };
+                self.wurst.settings.glide_fall_speed =
+                    if v > 0.25 { 0.025 } else { v.clamp(0.005, 0.25) };
             }
         }
         self.wurst.save();
     }
 
     pub(super) fn handle_wurst_mouse(&mut self, button: MouseButton, pressed: bool) -> bool {
-        if !self.wurst.active || !self.wurst.menu_open {
+        if !self.wurst.active {
+            return false;
+        }
+        if self.wurst.wurst_options_open {
+            if pressed && button == MouseButton::Left {
+                self.click_wurst_options();
+            }
+            return true;
+        }
+        if !self.wurst.menu_open {
             return false;
         }
         if !pressed {
@@ -565,20 +637,20 @@ impl Game<'_> {
         }
         let [mx, my] = self.wurst.gui_cursor;
         let title_h = 13.0_f32;
-        let row_h = 13.0_f32;
+        let row_step = 13.0_f32;
 
-        // Check top-most window first (reverse draw order)
         for idx in (0..self.wurst.gui_windows.len()).rev() {
             let win = self.wurst.gui_windows[idx].clone();
             if mx < win.x || mx > win.x + win.width || my < win.y {
                 continue;
             }
-            // Title bar
             if my <= win.y + title_h {
                 if button == MouseButton::Left {
-                    if mx >= win.x + win.width - 12.0 {
+                    // Minimize box: [x2 - 11 .. x2 - 2]
+                    if mx >= win.x + win.width - 11.0 {
                         self.wurst.gui_windows[idx].minimized = !win.minimized;
-                    } else if mx >= win.x + win.width - 24.0 {
+                    } else if mx >= win.x + win.width - 22.0 {
+                        // Pin box: [x2 - 22 .. x2 - 13]
                         self.wurst.gui_windows[idx].pinned = !win.pinned;
                     } else {
                         self.wurst.gui_dragging = Some((idx, mx - win.x, my - win.y));
@@ -591,26 +663,41 @@ impl Game<'_> {
             if win.minimized {
                 continue;
             }
-            let body_y = win.y + title_h + 2.0;
+            let body_y = win.y + title_h;
             if let Some(cat) = win.category {
                 let hacks = Self::window_hacks(cat);
-                let body_h = (hacks.len() as f32) * row_h + 2.0;
-                if my <= body_y + body_h {
-                    let row = ((my - body_y) / row_h) as usize;
-                    if let Some(&id) = hacks.get(row)
-                        && button == MouseButton::Left
-                    {
-                        self.wurst.toggle(id);
+                let inner_h = 2.0 + (hacks.len() as f32) * row_step;
+                let outer_h = inner_h.min(MAX_INNER_HEIGHT);
+                if my <= body_y + outer_h {
+                    let rel_y = my - body_y - win.scroll - 2.0;
+                    if rel_y >= 0.0 {
+                        let row = (rel_y / row_step) as usize;
+                        let in_row_y = rel_y - (row as f32) * row_step;
+                        if in_row_y <= 11.0
+                            && let Some(&id) = hacks.get(row)
+                            && button == MouseButton::Left
+                        {
+                            self.wurst.toggle(id);
+                            self.audio.play_button_click();
+                        }
                     }
                     return true;
                 }
             } else {
-                let body_h = (UiSettingId::ALL.len() as f32) * row_h + 2.0;
-                if my <= body_y + body_h {
-                    let row = ((my - body_y) / row_h) as usize;
-                    if let Some(&s) = UiSettingId::ALL.get(row) {
-                        let delta = if button == MouseButton::Right { -1.0 } else { 1.0 };
-                        self.step_ui_setting(s, delta);
+                let inner_h = 2.0 + (UiSettingId::ALL.len() as f32) * row_step;
+                let outer_h = inner_h.min(MAX_INNER_HEIGHT);
+                if my <= body_y + outer_h {
+                    let rel_y = my - body_y - win.scroll - 2.0;
+                    if rel_y >= 0.0 {
+                        let row = (rel_y / row_step) as usize;
+                        let in_row_y = rel_y - (row as f32) * row_step;
+                        if in_row_y <= 11.0
+                            && let Some(&s) = UiSettingId::ALL.get(row)
+                        {
+                            let delta = if button == MouseButton::Right { -1.0 } else { 1.0 };
+                            self.step_ui_setting(s, delta);
+                            self.audio.play_button_click();
+                        }
                     }
                     return true;
                 }
@@ -619,37 +706,357 @@ impl Game<'_> {
         true
     }
 
-    /// Draws Wurst7's `WurstLogo`, `HackListHUD`, and draggable `ClickGui` windows.
+    /// ClickGuiIcons.drawMinimizeArrow(x1, y1, x2, y2, hovering, minimized)
+    fn draw_minimize_arrow(
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        hovering: bool,
+        minimized: bool,
+    ) {
+        let xa1 = x1 + 1.0;
+        let xa2 = (x1 + x2) * 0.5;
+        let xa3 = x2 - 1.0;
+        if minimized {
+            let ya1 = y1 + 3.0;
+            let ya2 = y2 - 2.5;
+            let c = if hovering {
+                rgba(0, 255, 0, 255)
+            } else {
+                rgba(0, 217, 0, 255)
+            };
+            batch.fill_triangle(atlas, [[xa1, ya1], [xa2, ya2], [xa3, ya1]], c);
+        } else {
+            let ya1 = y2 - 3.0;
+            let ya2 = y1 + 2.5;
+            let c = if hovering {
+                rgba(255, 0, 0, 255)
+            } else {
+                rgba(217, 0, 0, 255)
+            };
+            batch.fill_triangle(atlas, [[xa1, ya1], [xa3, ya1], [xa2, ya2]], c);
+        }
+    }
+
+    /// ClickGuiIcons.drawPin(x1, y1, x2, y2, hovering, pinned)
+    fn draw_pin_icon(
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        hovering: bool,
+        pinned: bool,
+    ) {
+        let needle = if hovering {
+            rgba(255, 255, 255, 255)
+        } else {
+            rgba(217, 217, 217, 255)
+        };
+        if pinned {
+            let knob = if hovering {
+                rgba(255, 0, 0, 255)
+            } else {
+                rgba(217, 0, 0, 255)
+            };
+            batch.fill(atlas, x1 + 2.0, y1 + 2.0, (x2 - x1) - 4.0, (y2 - y1) - 4.0, knob);
+            batch.fill(atlas, x1 + 1.0, y2 - 2.5, (x2 - x1) - 2.0, 1.5, knob);
+            batch.fill(atlas, x1 + 3.5, y2 - 1.5, (x2 - x1) - 7.0, 1.5, needle);
+        } else {
+            let knob = if hovering {
+                rgba(0, 255, 0, 255)
+            } else {
+                rgba(0, 217, 0, 255)
+            };
+            batch.fill(atlas, x1 + 2.5, y1 + 1.5, 4.5, 4.5, knob);
+            batch.fill_triangle(
+                atlas,
+                [[x1 + 1.0, y2 - 1.0], [x1 + 4.0, y2 - 3.0], [x1 + 3.0, y2 - 4.0]],
+                needle,
+            );
+        }
+    }
+
+    fn draw_border_2d(
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        color: u32,
+    ) {
+        let w = (x2 - x1).max(0.0);
+        let h = (y2 - y1).max(0.0);
+        batch.fill(atlas, x1, y1, w, 1.0, color);
+        batch.fill(atlas, x1, y2 - 1.0, w, 1.0, color);
+        batch.fill(atlas, x1, y1, 1.0, h, color);
+        batch.fill(atlas, x2 - 1.0, y1, 1.0, h, color);
+    }
+
+    fn click_wurst_options(&mut self) {
+        let (w, h) = self.gui_size();
+        let mx = w * 0.5;
+        let y0 = h * 0.25 - 16.0;
+        let cur = (self.wurst.gui_cursor[0], self.wurst.gui_cursor[1]);
+
+        // Column 1: Settings (x = mx - 154, w = 100, h = 20)
+        let x1 = mx - 154.0;
+        if horizon_client::ui::hovered(cur, x1, y0 + 24.0, 100.0, 20.0) {
+            self.wurst.settings.click_friends = !self.wurst.settings.click_friends;
+            self.wurst.save();
+            self.audio.play_button_click();
+            return;
+        }
+        if horizon_client::ui::hovered(cur, x1, y0 + 48.0, 100.0, 20.0) {
+            self.wurst.settings.count_users = !self.wurst.settings.count_users;
+            self.wurst.save();
+            self.audio.play_button_click();
+            return;
+        }
+        if horizon_client::ui::hovered(cur, x1, y0 + 72.0, 100.0, 20.0) {
+            self.wurst.settings.spoof_vanilla = !self.wurst.settings.spoof_vanilla;
+            self.wurst.save();
+            self.audio.play_button_click();
+            return;
+        }
+        if horizon_client::ui::hovered(cur, x1, y0 + 96.0, 100.0, 20.0) {
+            self.wurst.settings.translations = !self.wurst.settings.translations;
+            self.wurst.save();
+            self.audio.play_button_click();
+            return;
+        }
+
+        // Column 2: Managers (x = mx - 50, w = 100, h = 20)
+        let x2 = mx - 50.0;
+        if horizon_client::ui::hovered(cur, x2, y0 + 24.0, 100.0, 20.0) {
+            self.audio.play_button_click();
+            self.wurst.wurst_options_open = false;
+            self.set_screen(Screen::Playing);
+            self.wurst.menu_open = true;
+            self.capture(false);
+            return;
+        }
+        if horizon_client::ui::hovered(cur, x2, y0 + 48.0, 100.0, 20.0) {
+            self.audio.play_button_click();
+            self.wurst.toggle(HackId::XRay);
+            return;
+        }
+        if horizon_client::ui::hovered(cur, x2, y0 + 72.0, 100.0, 20.0) {
+            self.audio.play_button_click();
+            self.wurst.settings.show_tabgui = !self.wurst.settings.show_tabgui;
+            self.wurst.save();
+            return;
+        }
+
+        // Column 3: Links (x = mx + 54, w = 100, h = 20)
+        let x3 = mx + 54.0;
+        let links = [
+            (24.0, "https://www.wurstclient.net/options-website/"),
+            (48.0, "https://www.wurstclient.net/options-wiki/"),
+            (72.0, "https://www.wurstclient.net/options-forum/"),
+            (96.0, "https://www.wurstclient.net/options-twitter/"),
+            (120.0, "https://www.wurstclient.net/options-donate/"),
+        ];
+        for (dy, url) in links {
+            if horizon_client::ui::hovered(cur, x3, y0 + dy, 100.0, 20.0) {
+                self.audio.play_button_click();
+                self.click_url(url.to_owned());
+                return;
+            }
+        }
+
+        // Bottom Back button: (mx - 100, h / 4 + 128, 200, 20)
+        if horizon_client::ui::hovered(cur, mx - 100.0, h * 0.25 + 128.0, 200.0, 20.0) {
+            self.audio.play_button_click();
+            self.wurst.wurst_options_open = false;
+            self.set_screen(Screen::Paused);
+        }
+    }
+
+    fn draw_wurst_options_screen(&self, batch: &mut HudBatch) {
+        let atlas = &self.gui.atlas;
+        let (w, h) = (batch.width, batch.height);
+        let mx = w * 0.5;
+        let y0 = h * 0.25 - 16.0;
+        let cur = (self.wurst.gui_cursor[0], self.wurst.gui_cursor[1]);
+
+        horizon_client::ui::menu_background(batch, atlas, 0.0, 0.0, w, h, true);
+
+        let title = "Wurst Options";
+        let tw = HudBatch::text_width(atlas, title);
+        batch.text_styled(
+            atlas,
+            &Text::literal(title),
+            mx - tw * 0.5,
+            40.0,
+            rgba(255, 255, 255, 255),
+            true,
+        );
+
+        let headers = [
+            (mx - 104.0, "Settings"),
+            (mx, "Managers"),
+            (mx + 104.0, "Links"),
+        ];
+        for (cx, label) in headers {
+            let lw = HudBatch::text_width(atlas, label);
+            batch.text_styled(
+                atlas,
+                &Text::literal(label),
+                cx - lw * 0.5,
+                h * 0.25 - 4.0,
+                rgba(240, 240, 240, 255),
+                true,
+            );
+        }
+
+        let draw_btn = |batch: &mut HudBatch, x: f32, y: f32, bw: f32, label: &str| {
+            let hov = horizon_client::ui::hovered(cur, x, y, bw, 20.0);
+            horizon_client::ui::button(
+                batch,
+                atlas,
+                x,
+                y,
+                bw,
+                20.0,
+                &Text::literal(label),
+                hov,
+                true,
+            );
+        };
+
+        let x1 = mx - 154.0;
+        draw_btn(
+            batch,
+            x1,
+            y0 + 24.0,
+            100.0,
+            &format!(
+                "Click Friends: {}",
+                if self.wurst.settings.click_friends { "ON" } else { "OFF" }
+            ),
+        );
+        draw_btn(
+            batch,
+            x1,
+            y0 + 48.0,
+            100.0,
+            &format!(
+                "Count Users: {}",
+                if self.wurst.settings.count_users { "ON" } else { "OFF" }
+            ),
+        );
+        draw_btn(
+            batch,
+            x1,
+            y0 + 72.0,
+            100.0,
+            &format!(
+                "Spoof Vanilla: {}",
+                if self.wurst.settings.spoof_vanilla { "ON" } else { "OFF" }
+            ),
+        );
+        draw_btn(
+            batch,
+            x1,
+            y0 + 96.0,
+            100.0,
+            &format!(
+                "Translations: {}",
+                if self.wurst.settings.translations { "ON" } else { "OFF" }
+            ),
+        );
+
+        let x2 = mx - 50.0;
+        draw_btn(batch, x2, y0 + 24.0, 100.0, "ClickGUI / Binds");
+        draw_btn(
+            batch,
+            x2,
+            y0 + 48.0,
+            100.0,
+            &format!(
+                "X-Ray: {}",
+                if self.wurst.is_enabled(HackId::XRay) { "ON" } else { "OFF" }
+            ),
+        );
+        draw_btn(
+            batch,
+            x2,
+            y0 + 72.0,
+            100.0,
+            &format!(
+                "TabGUI: {}",
+                if self.wurst.settings.show_tabgui { "ON" } else { "OFF" }
+            ),
+        );
+
+        let x3 = mx + 54.0;
+        draw_btn(batch, x3, y0 + 24.0, 100.0, "Official Website");
+        draw_btn(batch, x3, y0 + 48.0, 100.0, "Wurst Wiki");
+        draw_btn(batch, x3, y0 + 72.0, 100.0, "WurstForum");
+        draw_btn(batch, x3, y0 + 96.0, 100.0, "Twitter");
+        draw_btn(batch, x3, y0 + 120.0, 100.0, "Donate");
+
+        draw_btn(batch, mx - 100.0, h * 0.25 + 128.0, 200.0, "Back");
+    }
+
+    /// Draws Wurst7's `WurstLogo`, `TabGui`, `HackListHUD`, `ClickGui`, and `WurstOptionsScreen`.
     pub(super) fn draw_wurst_hud(&self, batch: &mut HudBatch) {
         if !self.wurst.active {
             return;
         }
+        if self.wurst.wurst_options_open {
+            self.draw_wurst_options_screen(batch);
+            return;
+        }
+
         let atlas = &self.gui.atlas;
         let (w, _h) = (batch.width, batch.height);
 
-        // 1. WurstLogo.java: translucent white bar + WURST badge + version in black
+        let bg_color = rgba(64, 64, 64, 128);
+        let bg_hover = rgba(64, 64, 64, 191);
+        let ac_color = rgba(16, 16, 16, 128);
+        let ac_hover = rgba(16, 16, 16, 191);
+        let outline_color = rgba(16, 16, 16, 128);
+        let txt_color = rgba(240, 240, 240, 255);
+        let green_on = rgba(0, 255, 0, 128);
+        let green_hover = rgba(0, 255, 0, 191);
+
+        // 1. WurstLogo.java (exact coordinates & wurst_128.png RLE graphic)
         if self.wurst.settings.show_watermark {
             let ver = format!(
                 "v{} MC{}",
                 horizon_client::wurst::VERSION,
                 horizon_client::wurst::MC_VERSION
             );
-            let bar_w = 56.0 + (ver.len() as f32) * 5.8 + 8.0;
-            batch.fill(atlas, 0.0, 6.0, bar_w, 12.0, 0x80_FFFFFF);
-            batch.fill(atlas, 2.0, 4.0, 46.0, 15.0, 0xE8_FFFFFF);
-            batch.text_styled(atlas, &Text::literal("WURST"), 7.0, 7.5, 0xFF_000000, false);
-            batch.text_styled(atlas, &Text::literal(ver), 52.0, 8.0, 0xFF_000000, false);
+            let ver_w = HudBatch::text_width(atlas, &ver);
+            // extractor.fill(0, 6, tr.width(version) + 76, 17, bgColor) -> y=6, h=11
+            batch.fill(atlas, 0.0, 6.0, ver_w + 76.0, 11.0, rgba(255, 255, 255, 128));
+            batch.text_styled(
+                atlas,
+                &Text::literal(ver),
+                74.0,
+                8.0,
+                rgba(0, 0, 0, 255),
+                false,
+            );
+            Self::draw_wurst_logo(batch, atlas, 0.0, 3.0, 1.0, 1.0);
         }
 
-        // 2. TabGui.java: (2, 23), 0x7F_404040 bg, 0x7F_101010 border, 10px rows
+        // 2. TabGui.java: (2, 23), off by default just like TabGuiOtf.java
         if self.wurst.settings.show_tabgui {
             let tx = 2.0_f32;
             let ty = 23.0_f32;
             let tw = 64.0_f32;
             let cats = Category::ALL;
             let th = (cats.len() as f32) * 10.0;
-            batch.fill(atlas, tx - 1.0, ty - 1.0, tw + 2.0, th + 2.0, 0x7F_101010);
-            batch.fill(atlas, tx, ty, tw, th, 0x7F_404040);
+            batch.fill(atlas, tx, ty, tw, th, bg_color);
+            Self::draw_border_2d(batch, atlas, tx, ty, tx + tw, ty + th, outline_color);
             for (i, cat) in cats.iter().enumerate() {
                 let prefix = if i == self.wurst.tab_selected {
                     if self.wurst.tab_opened { "<" } else { ">" }
@@ -662,7 +1069,7 @@ impl Game<'_> {
                     &Text::literal(label),
                     tx + 2.0,
                     ty + 1.0 + (i as f32) * 10.0,
-                    0xFF_F0F0F0,
+                    txt_color,
                     false,
                 );
             }
@@ -670,17 +1077,17 @@ impl Game<'_> {
                 let hacks = Self::window_hacks(cats[self.wurst.tab_selected]);
                 if !hacks.is_empty() {
                     let sx = tx + tw + 2.0;
-                    let sw = 78.0_f32;
+                    let sw = 84.0_f32;
                     let sh = (hacks.len() as f32) * 10.0;
-                    batch.fill(atlas, sx - 1.0, ty - 1.0, sw + 2.0, sh + 2.0, 0x7F_101010);
-                    batch.fill(atlas, sx, ty, sw, sh, 0x7F_404040);
+                    batch.fill(atlas, sx, ty, sw, sh, bg_color);
+                    Self::draw_border_2d(batch, atlas, sx, ty, sx + sw, ty + sh, outline_color);
                     for (i, &id) in hacks.iter().enumerate() {
                         let prefix = if i == self.wurst.tab_feature_selected { ">" } else { "" };
                         let label = format!("{prefix}{}", id.name());
                         let color = if self.wurst.is_enabled(id) {
-                            0xFF_55FF55
+                            rgba(85, 255, 85, 255)
                         } else {
-                            0xFF_F0F0F0
+                            txt_color
                         };
                         batch.text_styled(
                             atlas,
@@ -695,138 +1102,227 @@ impl Game<'_> {
             }
         }
 
-        // 3. HackListHUD.java: clean white text list top-right
+        // 3. HackListHUD.java: top-left below WurstLogo (or top-right) in crisp white
         if self.wurst.settings.show_hacklist {
             let active_hacks = self.wurst.enabled_render_names();
-            let mut y = 4.0_f32;
+            let mut y = if self.wurst.settings.show_tabgui { 106.0 } else { 23.0 };
             for name in active_hacks {
-                let text_w = (name.len() as f32) * 5.8;
-                let x = (w - text_w - 4.0).max(4.0);
-                batch.text_styled(atlas, &Text::literal(name), x, y, 0xFF_FFFFFF, true);
-                y += 10.0;
+                batch.text_styled(atlas, &Text::literal(name), 2.0, y, rgba(255, 255, 255, 255), true);
+                y += 9.0;
             }
         }
 
-        // 4. ClickGui.java + Window.java + FeatureButton.java (pinned windows stay visible!)
+        // 4. ClickGui.java + Window.java + ClickGuiIcons.java + FeatureButton.java
         let [mx, my] = self.wurst.gui_cursor;
         let title_h = 13.0_f32;
-        let row_h = 12.0_f32;
+        let row_step = 13.0_f32;
         let mut tooltip: Option<&'static str> = None;
 
         for win in &self.wurst.gui_windows {
             if !self.wurst.menu_open && !win.pinned {
                 continue;
             }
-            // Wurst7 ClickGuiHack colors: acColor = 0x101010 border/title, bgColor = 0x404040 @ 0.5F
-            batch.fill(atlas, win.x - 1.0, win.y - 1.0, win.width + 2.0, title_h + 2.0, 0x7F_101010);
-            batch.fill(atlas, win.x, win.y, win.width, title_h, 0xBF_101010);
+            let x1 = win.x;
+            let y1 = win.y;
+            let x2 = x1 + win.width;
+            let y3 = y1 + title_h;
+
+            // Title bar background (`toIntColor(acColor, opacity)`)
+            batch.fill(atlas, x1, y1, win.width, title_h, ac_color);
             batch.text_styled(
                 atlas,
                 &Text::literal(win.title),
-                win.x + 4.0,
-                win.y + 2.5,
-                0xFF_F0F0F0,
-                false,
-            );
-            let pin_color = if win.pinned { 0xFF_55FF55 } else { 0xFF_AAAAAA };
-            batch.text_styled(
-                atlas,
-                &Text::literal("P"),
-                win.x + win.width - 21.0,
-                win.y + 2.5,
-                pin_color,
-                false,
-            );
-            let min_label = if win.minimized { "+" } else { "-" };
-            batch.text_styled(
-                atlas,
-                &Text::literal(min_label),
-                win.x + win.width - 10.0,
-                win.y + 2.5,
-                0xFF_F0F0F0,
+                x1 + 2.0,
+                y1 + 3.0,
+                txt_color,
                 false,
             );
 
+            // Pin button: 9x9 at [x2 - 22, y1 + 2]..[x2 - 13, y1 + 11]
+            let px1 = x2 - 22.0;
+            let px2 = x2 - 13.0;
+            let py1 = y1 + 2.0;
+            let py2 = y1 + 11.0;
+            let h_pin = self.wurst.menu_open && mx >= px1 && mx <= px2 && my >= py1 && my <= py2;
+            batch.fill(atlas, px1, py1, 9.0, 9.0, if h_pin { bg_hover } else { bg_color });
+            Self::draw_pin_icon(batch, atlas, px1, py1, px2, py2, h_pin, win.pinned);
+            Self::draw_border_2d(batch, atlas, px1, py1, px2, py2, outline_color);
+
+            // Minimize button: 9x9 at [x2 - 11, y1 + 2]..[x2 - 2, y1 + 11]
+            let mx1 = x2 - 11.0;
+            let mx2 = x2 - 2.0;
+            let h_min = self.wurst.menu_open && mx >= mx1 && mx <= mx2 && my >= py1 && my <= py2;
+            batch.fill(atlas, mx1, py1, 9.0, 9.0, if h_min { bg_hover } else { bg_color });
+            Self::draw_minimize_arrow(batch, atlas, mx1, py1, mx2, py2, h_min, win.minimized);
+            Self::draw_border_2d(batch, atlas, mx1, py1, mx2, py2, outline_color);
+
             if win.minimized {
+                Self::draw_border_2d(batch, atlas, x1, y1, x2, y3, outline_color);
                 continue;
             }
 
-            let body_y = win.y + title_h + 1.0;
             if let Some(cat) = win.category {
                 let hacks = Self::window_hacks(cat);
-                let body_h = (hacks.len() as f32) * row_h + 2.0;
-                batch.fill(atlas, win.x - 1.0, body_y, win.width + 2.0, body_h + 1.0, 0x7F_101010);
-                batch.fill(atlas, win.x, body_y, win.width, body_h, 0x7F_404040);
+                let inner_h = 2.0 + (hacks.len() as f32) * row_step;
+                let scrolling = inner_h > MAX_INNER_HEIGHT;
+                let outer_h = inner_h.min(MAX_INNER_HEIGHT);
+                let y2 = y3 + outer_h;
+
+                // Window body background
+                batch.fill(atlas, x1, y3, win.width, outer_h, bg_color);
+
+                if scrolling {
+                    let xs1 = x2 - 3.0;
+                    let thumb_y = y3 + outer_h * (-win.scroll / inner_h) + 1.0;
+                    let thumb_h = ((outer_h - 2.0) * outer_h / inner_h).max(8.0);
+                    batch.fill(atlas, xs1, thumb_y, 2.0, thumb_h, ac_hover);
+                    Self::draw_border_2d(batch, atlas, xs1, thumb_y, xs1 + 2.0, thumb_y + thumb_h, outline_color);
+                }
+
+                let clip_start = batch.vertices.len();
+                let c_width = if scrolling { win.width - 7.0 } else { win.width - 4.0 };
 
                 for (i, &id) in hacks.iter().enumerate() {
-                    let bx = win.x + 2.0;
-                    let by = body_y + 1.0 + (i as f32) * row_h;
-                    let bw = win.width - 4.0;
-                    let bh = row_h - 1.0;
-                    let hovered = self.wurst.menu_open
-                        && mx >= bx && mx <= bx + bw && my >= by && my <= by + bh;
+                    let bx1 = x1 + 2.0;
+                    let by1 = y3 + 2.0 + win.scroll + (i as f32) * row_step;
+                    let bx2 = bx1 + c_width;
+                    let by2 = by1 + 11.0;
+                    if by2 < y3 || by1 > y2 {
+                        continue;
+                    }
+                    let has_settings = id.has_settings();
+                    let bx3 = if has_settings { bx2 - 11.0 } else { bx2 };
+
+                    let in_body = my >= y3 && my <= y2;
+                    let h_feat = self.wurst.menu_open
+                        && in_body
+                        && mx >= bx1
+                        && mx <= bx3
+                        && my >= by1
+                        && my <= by2;
+                    let h_set = self.wurst.menu_open
+                        && has_settings
+                        && in_body
+                        && mx > bx3
+                        && mx <= bx2
+                        && my >= by1
+                        && my <= by2;
                     let on = self.wurst.is_enabled(id);
-                    if hovered {
+                    if h_feat {
                         tooltip = Some(id.description());
                     }
-                    let bg = match (on, hovered) {
-                        (true, true) => 0xA0_00E000,
-                        (true, false) => 0x80_00C000,
-                        (false, true) => 0x90_606060,
-                        (false, false) => 0x60_404040,
+
+                    let btn_bg = match (on, h_feat) {
+                        (true, true) => green_hover,
+                        (true, false) => green_on,
+                        (false, true) => bg_hover,
+                        (false, false) => bg_color,
                     };
-                    batch.fill(atlas, bx, by, bw, bh, bg);
+                    batch.fill(atlas, bx1, by1, bx3 - bx1, 11.0, btn_bg);
+                    if has_settings {
+                        batch.fill(
+                            atlas,
+                            bx3,
+                            by1,
+                            11.0,
+                            11.0,
+                            if h_set { bg_hover } else { bg_color },
+                        );
+                        batch.fill(atlas, bx3, by1, 1.0, 11.0, outline_color);
+                        Self::draw_minimize_arrow(
+                            batch,
+                            atlas,
+                            bx3 + 1.0,
+                            by1 + 0.5,
+                            bx2 - 1.0,
+                            by2 - 0.5,
+                            h_set,
+                            true,
+                        );
+                    }
+                    Self::draw_border_2d(batch, atlas, bx1, by1, bx2, by2, outline_color);
+
+                    let nw = HudBatch::text_width(atlas, id.name());
+                    let tx = bx1 + ((bx3 - bx1) - nw) * 0.5;
                     batch.text_styled(
                         atlas,
                         &Text::literal(id.name()),
-                        bx + 4.0,
-                        by + 1.5,
-                        0xFF_F0F0F0,
+                        tx,
+                        by1 + 2.0,
+                        txt_color,
                         false,
                     );
                 }
+
+                batch.clip_since(clip_start, x1, y3, x2, y2);
+                batch.fill(atlas, x1, y3, win.width, 1.0, outline_color);
+                Self::draw_border_2d(batch, atlas, x1, y1, x2, y2, outline_color);
             } else {
-                let body_h = (UiSettingId::ALL.len() as f32) * row_h + 2.0;
-                batch.fill(atlas, win.x - 1.0, body_y, win.width + 2.0, body_h + 1.0, 0x7F_101010);
-                batch.fill(atlas, win.x, body_y, win.width, body_h, 0x7F_404040);
+                let inner_h = 2.0 + (UiSettingId::ALL.len() as f32) * row_step;
+                let outer_h = inner_h.min(MAX_INNER_HEIGHT);
+                let y2 = y3 + outer_h;
+
+                batch.fill(atlas, x1, y3, win.width, outer_h, bg_color);
+                let clip_start = batch.vertices.len();
+                let c_width = win.width - 4.0;
 
                 for (i, &s) in UiSettingId::ALL.iter().enumerate() {
-                    let bx = win.x + 2.0;
-                    let by = body_y + 1.0 + (i as f32) * row_h;
-                    let bw = win.width - 4.0;
-                    let bh = row_h - 1.0;
-                    let hovered = self.wurst.menu_open
-                        && mx >= bx && mx <= bx + bw && my >= by && my <= by + bh;
+                    let bx1 = x1 + 2.0;
+                    let by1 = y3 + 2.0 + win.scroll + (i as f32) * row_step;
+                    let bx2 = bx1 + c_width;
+                    let by2 = by1 + 11.0;
+                    let hov = self.wurst.menu_open
+                        && mx >= bx1
+                        && mx <= bx2
+                        && my >= by1
+                        && my <= by2;
                     let on = self.ui_setting_active(s);
-                    let bg = match (on, hovered) {
-                        (true, true) => 0xA0_00E000,
-                        (true, false) => 0x80_00C000,
-                        (false, true) => 0x90_606060,
-                        (false, false) => 0x60_404040,
+                    let btn_bg = match (on, hov) {
+                        (true, true) => green_hover,
+                        (true, false) => green_on,
+                        (false, true) => bg_hover,
+                        (false, false) => bg_color,
                     };
-                    batch.fill(atlas, bx, by, bw, bh, bg);
+                    batch.fill(atlas, bx1, by1, c_width, 11.0, btn_bg);
+                    Self::draw_border_2d(batch, atlas, bx1, by1, bx2, by2, outline_color);
+
+                    let label = self.ui_setting_label(s);
+                    let nw = HudBatch::text_width(atlas, &label);
+                    let tx = bx1 + (c_width - nw) * 0.5;
                     batch.text_styled(
                         atlas,
-                        &Text::literal(self.ui_setting_label(s)),
-                        bx + 4.0,
-                        by + 1.5,
-                        0xFF_F0F0F0,
+                        &Text::literal(label),
+                        tx,
+                        by1 + 2.0,
+                        txt_color,
                         false,
                     );
                 }
+
+                batch.clip_since(clip_start, x1, y3, x2, y2);
+                batch.fill(atlas, x1, y3, win.width, 1.0, outline_color);
+                Self::draw_border_2d(batch, atlas, x1, y1, x2, y2, outline_color);
             }
         }
 
-        // Hover tooltip box (matching ClickGui.renderTooltip)
+        // Hover tooltip box (ClickGui.renderTooltip)
         if self.wurst.menu_open
             && let Some(tip) = tooltip
         {
-            let tw = (tip.len() as f32) * 5.8 + 8.0;
+            let tw = HudBatch::text_width(atlas, tip) + 6.0;
             let tx = (mx + 8.0).min((w - tw - 4.0).max(4.0));
-            let ty = my + 10.0;
-            batch.fill(atlas, tx - 1.0, ty - 1.0, tw + 2.0, 14.0, 0x7F_101010);
-            batch.fill(atlas, tx, ty, tw, 12.0, 0xC0_404040);
-            batch.text_styled(atlas, &Text::literal(tip), tx + 4.0, ty + 2.0, 0xFF_F0F0F0, false);
+            let ty = my - 14.0;
+            let tt_bg = rgba(64, 64, 64, 191);
+            batch.fill(atlas, tx, ty, tw, 13.0, tt_bg);
+            Self::draw_border_2d(batch, atlas, tx, ty, tx + tw, ty + 13.0, outline_color);
+            batch.text_styled(
+                atlas,
+                &Text::literal(tip),
+                tx + 3.0,
+                ty + 2.5,
+                txt_color,
+                false,
+            );
         }
     }
 }

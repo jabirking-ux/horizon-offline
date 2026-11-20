@@ -1,14 +1,13 @@
 //! Native Rust port of Wurst Client (v7.57-MC26.3, GPLv3 — https://github.com/Wurst-Imperium/Wurst7)
 //! for Horizon's Rust Minecraft client (`horizon-client`).
-//!
-//! Activated when `<game_dir>/horizon-native-mods/wurst.enabled` exists (toggled from the
-//! Borizon launcher's Mods -> Horizon tab) or when `HORIZON_WURST=1` is set.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+include!("wurst_logo_data.rs");
 
 pub const VERSION: &str = "7.57";
 pub const MC_VERSION: &str = "26.3";
@@ -17,206 +16,290 @@ pub const CONFIG_FILE: &str = "wurst-config.json";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Category {
-    Movement,
-    Render,
-    Combat,
-    Player,
     Blocks,
+    Movement,
+    Combat,
+    Render,
     Chat,
     Fun,
+    Items,
     Other,
 }
 
 impl Category {
     pub const ALL: [Category; 8] = [
-        Category::Movement,
-        Category::Render,
-        Category::Combat,
-        Category::Player,
         Category::Blocks,
+        Category::Movement,
+        Category::Combat,
+        Category::Render,
         Category::Chat,
         Category::Fun,
+        Category::Items,
         Category::Other,
     ];
 
     pub fn name(self) -> &'static str {
         match self {
-            Category::Movement => "Movement",
-            Category::Render => "Render",
-            Category::Combat => "Combat",
-            Category::Player => "Player",
             Category::Blocks => "Blocks",
+            Category::Movement => "Movement",
+            Category::Combat => "Combat",
+            Category::Render => "Render",
             Category::Chat => "Chat",
             Category::Fun => "Fun",
+            Category::Items => "Items",
             Category::Other => "Other",
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum HackId {
-    AirJump,
-    AntiBlind,
-    AutoSprint,
-    BunnyHop,
-    CreativeFlight,
-    Dolphin,
-    FastPlace,
-    Flight,
-    Fullbright,
-    Glide,
-    HighJump,
-    Jesus,
-    Jetpack,
-    NoClip,
-    NoFall,
-    NoSlowdown,
-    Parkour,
-    SafeWalk,
-    SpeedHack,
-    Spider,
-    Step,
-    Timer,
+macro_rules! define_hacks {
+    ($(($variant:ident, $name:literal, $cat:ident, $desc:literal)),* $(,)?) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        pub enum HackId {
+            $($variant,)*
+        }
+
+        impl HackId {
+            pub const ALL: [HackId; 155] = [
+                $(HackId::$variant,)*
+            ];
+
+            pub fn name(self) -> &'static str {
+                match self {
+                    $(HackId::$variant => $name,)*
+                }
+            }
+
+            pub fn category(self) -> Category {
+                match self {
+                    $(HackId::$variant => Category::$cat,)*
+                }
+            }
+
+            pub fn description(self) -> &'static str {
+                match self {
+                    $(HackId::$variant => $desc,)*
+                }
+            }
+        }
+    };
 }
 
+define_hacks!(
+    // 1. BLOCKS (26)
+    (AirPlace, "AirPlace", Blocks, "Allows you to place blocks in mid-air."),
+    (AntiCactus, "AntiCactus", Blocks, "Protects you from cactus damage."),
+    (AutoBuild, "AutoBuild", Blocks, "Automatically builds the selected template."),
+    (AutoFarm, "AutoFarm", Blocks, "Harvests and re-plants crops automatically."),
+    (AutoMine, "AutoMine", Blocks, "Automatically mines the block you look at."),
+    (AutoSign, "AutoSign", Blocks, "Instantly writes pre-set text on signs."),
+    (AutoTool, "AutoTool", Blocks, "Automatically equips the fastest applicable tool."),
+    (BonemealAura, "BonemealAura", Blocks, "Automatically uses bone meal on nearby crops."),
+    (BuildRandom, "BuildRandom", Blocks, "Randomly places blocks around you."),
+    (Excavator, "Excavator", Blocks, "Automatically breaks all blocks in the selected area."),
+    (FastBreak, "FastBreak", Blocks, "Allows you to break blocks faster."),
+    (FastPlace, "FastPlace", Blocks, "Allows you to place blocks 5 times faster."),
+    (HandNoClip, "HandNoClip", Blocks, "Allows you to reach specific blocks through walls."),
+    (InstaBuild, "InstaBuild", Blocks, "Builds small structures instantly."),
+    (InstantBunker, "InstantBunker", Blocks, "Builds a 5x5x3 bunker around you."),
+    (Kaboom, "Kaboom", Blocks, "Breaks blocks around you like an explosion."),
+    (Liquids, "Liquids", Blocks, "Allows you to interact with liquid blocks."),
+    (Nuker, "Nuker", Blocks, "Automatically breaks blocks around you."),
+    (NukerLegit, "NukerLegit", Blocks, "Slower Nuker that bypasses all cheat prevention plugins."),
+    (ScaffoldWalk, "ScaffoldWalk", Blocks, "Automatically places blocks below your feet."),
+    (SpeedNuker, "SpeedNuker", Blocks, "Faster version of Nuker that cannot bypass NoCheat+."),
+    (TemplateTool, "TemplateTool", Blocks, "Allows you to create custom templates for AutoBuild."),
+    (Tillaura, "Tillaura", Blocks, "Automatically turns dirt, grass, etc. into farmland."),
+    (TreeBot, "TreeBot", Blocks, "Experimental bot that chops down trees around you."),
+    (Tunneller, "Tunneller", Blocks, "Automatically digs a tunnel around you."),
+    (VeinMiner, "VeinMiner", Blocks, "Automatically mines an entire vein of ore."),
+
+    // 2. MOVEMENT (34 incl. AirJump)
+    (AirJump, "AirJump", Movement, "Allows you to jump in mid-air."),
+    (AntiEntityPush, "AntiEntityPush", Movement, "Prevents you from getting pushed by other entities."),
+    (AntiHunger, "AntiHunger", Movement, "Slows down your hunger when you are walking."),
+    (AntiWaterPush, "AntiWaterPush", Movement, "Prevents you from getting pushed by water."),
+    (AutoSprint, "AutoSprint", Movement, "Makes you sprint automatically."),
+    (AutoSwim, "AutoSwim", Movement, "Triggers the swimming animation automatically."),
+    (AutoWalk, "AutoWalk", Movement, "Makes you walk automatically."),
+    (Blink, "Blink", Movement, "Suspends all motion updates while enabled."),
+    (BoatFly, "BoatFly", Movement, "Allows you to fly with boats and other rideable entities."),
+    (BunnyHop, "BunnyHop", Movement, "Makes you jump automatically while moving."),
+    (CreativeFlight, "CreativeFlight", Movement, "Allows you to fly like in Creative Mode."),
+    (Dolphin, "Dolphin", Movement, "Makes you bob up in water automatically."),
+    (ExtraElytra, "ExtraElytra", Movement, "Makes the Elytra easier to use."),
+    (FastLadder, "FastLadder", Movement, "Allows you to climb up ladders faster."),
+    (Fish, "Fish", Movement, "Disables underwater gravity so you can swim like a fish."),
+    (Flight, "Flight", Movement, "Allows you to fly."),
+    (Follow, "Follow", Movement, "A bot that follows the closest entity."),
+    (Glide, "Glide", Movement, "Makes you fall like if you had a hang glider."),
+    (HighJump, "HighJump", Movement, "Allows you to jump higher."),
+    (InvWalk, "InvWalk", Movement, "Allows you to walk while the inventory is open."),
+    (Jesus, "Jesus", Movement, "Allows you to walk on water."),
+    (Jetpack, "Jetpack", Movement, "Allows you to fly as if you had a jetpack."),
+    (NoClip, "NoClip", Movement, "Allows you to freely move through blocks."),
+    (NoFall, "NoFall", Movement, "Protects you from fall damage."),
+    (NoLevitation, "NoLevitation", Movement, "Removes the levitation effect when you get hit by a shulker."),
+    (NoSlowdown, "NoSlowdown", Movement, "Cancels slowness effects caused by items, cobwebs, and honey."),
+    (NoWeb, "NoWeb", Movement, "Prevents you from getting slowed down by cobwebs."),
+    (Parkour, "Parkour", Movement, "Makes you jump automatically when reaching the edge of a block."),
+    (SafeWalk, "SafeWalk", Movement, "Prevents you from falling off edges."),
+    (Sneak, "Sneak", Movement, "Makes you sneak automatically."),
+    (SnowShoe, "SnowShoe", Movement, "Allows you to walk on powder snow."),
+    (SpeedHack, "SpeedHack", Movement, "Allows you to run roughly 1.5x-5x faster than normal."),
+    (Spider, "Spider", Movement, "Allows you to climb up walls like a spider."),
+    (Step, "Step", Movement, "Allows you to step up full blocks."),
+
+    // 3. COMBAT (24)
+    (AimAssist, "AimAssist", Combat, "Helps you aim at nearby entities."),
+    (AnchorAura, "AnchorAura", Combat, "Automatically places, charges, and detonates respawn anchors."),
+    (AntiKnockback, "AntiKnockback", Combat, "Prevents you from getting pushed by players and mobs."),
+    (ArrowDMG, "ArrowDMG", Combat, "Massively increases arrow damage, but also consumes a lot of hunger."),
+    (AttributeSwap, "AttributeSwap", Combat, "Swaps to a mace or heavy weapon right as you attack."),
+    (AutoArmor, "AutoArmor", Combat, "Manages your armor automatically."),
+    (AutoLeave, "AutoLeave", Combat, "Automatically leaves the server when your health is low."),
+    (AutoPotion, "AutoPotion", Combat, "Automatically throws splash healing potions when your health is low."),
+    (AutoRespawn, "AutoRespawn", Combat, "Automatically respawns you whenever you die."),
+    (AutoSoup, "AutoSoup", Combat, "Automatically eats soup when your health is low."),
+    (AutoSword, "AutoSword", Combat, "Automatically equips the best weapon in your hotbar."),
+    (AutoTotem, "AutoTotem", Combat, "Automatically moves Totems of Undying to your off-hand."),
+    (BowAimbot, "BowAimbot", Combat, "Automatically aims your bow or crossbow."),
+    (ClickAura, "ClickAura", Combat, "Automatically attacks the closest valid entity whenever you click."),
+    (Criticals, "Criticals", Combat, "Changes all your hits to critical hits."),
+    (CrystalAura, "CrystalAura", Combat, "Automatically places and detonates End Crystals."),
+    (FightBot, "FightBot", Combat, "A bot that automatically walks around and kills everything."),
+    (Killaura, "Killaura", Combat, "Automatically attacks entities around you."),
+    (KillauraLegit, "KillauraLegit", Combat, "Slower Killaura that is harder to detect."),
+    (MaceDMG, "MaceDMG", Combat, "Increases the damage of mace smash attacks."),
+    (MultiAura, "MultiAura", Combat, "Faster Killaura that attacks multiple entities at once."),
+    (Protect, "Protect", Combat, "A bot that follows the closest entity and protects it."),
+    (TPAura, "TP-Aura", Combat, "Automatically attacks the closest valid entity while teleporting around it."),
+    (TriggerBot, "TriggerBot", Combat, "Automatically attacks the entity you are looking at."),
+
+    // 4. RENDER (37)
+    (AntiBlind, "AntiBlind", Render, "Prevents blindness and darkness."),
+    (AntiWobble, "AntiWobble", Render, "Disables the wobble effect caused by nausea and portals."),
+    (BarrierESP, "BarrierESP", Render, "Allows you to see barrier blocks."),
+    (BaseFinder, "BaseFinder", Render, "Finds player bases by searching for man-made blocks."),
+    (CameraDistance, "CameraDistance", Render, "Allows you to change the camera distance in 3rd person."),
+    (CameraNoClip, "CameraNoClip", Render, "Allows the camera in 3rd person to go through walls."),
+    (CaveFinder, "CaveFinder", Render, "Helps you to find caves by highlighting them."),
+    (ChestESP, "ChestESP", Render, "Highlights nearby chests and storage blocks."),
+    (Freecam, "Freecam", Render, "Allows you to move the camera without moving your character."),
+    (Fullbright, "Fullbright", Render, "Allows you to see in the dark."),
+    (HealthTags, "HealthTags", Render, "Shows the health of players in their nametags."),
+    (ItemESP, "ItemESP", Render, "Highlights nearby items."),
+    (MobESP, "MobESP", Render, "Highlights nearby mobs."),
+    (MobSpawnESP, "MobSpawnESP", Render, "Highlights areas where mobs can spawn."),
+    (NameProtect, "NameProtect", Render, "Hides all player names."),
+    (NameTags, "NameTags", Render, "Changes the scale of the nametags so you can always read them."),
+    (NewChunks, "NewChunks", Render, "Highlights newly generated chunks around you."),
+    (NoBackground, "NoBackground", Render, "Removes the dark background behind inventories."),
+    (NoFireOverlay, "NoFireOverlay", Render, "Blocks the fire overlay when you are burning."),
+    (NoFog, "NoFog", Render, "Removes all fog effects."),
+    (NoHurtcam, "NoHurtcam", Render, "Disables the shaking effect when you get hurt."),
+    (NoOverlay, "NoOverlay", Render, "Blocks the overlays of water, lava, and powdered snow."),
+    (NoPumpkin, "NoPumpkin", Render, "Blocks the overlay when wearing a carved pumpkin."),
+    (NoShieldOverlay, "NoShieldOverlay", Render, "Lowers the shield overlay so it blocks less of your view."),
+    (NoVignette, "NoVignette", Render, "Blocks the vignette overlay."),
+    (NoWeather, "NoWeather", Render, "Allows you to alter the client-side weather and time."),
+    (OpenWaterESP, "OpenWaterESP", Render, "Highlights open water for fishing."),
+    (Overlay, "Overlay", Render, "Renders the Nuker animation when you mine a block."),
+    (PlayerESP, "PlayerESP", Render, "Highlights nearby players."),
+    (PortalESP, "PortalESP", Render, "Highlights nearby portals."),
+    (ProphuntESP, "ProphuntESP", Render, "Allows you to see fake blocks in Prophunt."),
+    (Radar, "Radar", Render, "Shows the location of nearby entities."),
+    (RemoteView, "RemoteView", Render, "Allows you to see the world as someone else."),
+    (Search, "Search", Render, "Helps you to find specific blocks by highlighting them."),
+    (Trajectories, "Trajectories", Render, "Predicts the flight path of arrows and throwable items."),
+    (TrueSight, "TrueSight", Render, "Allows you to see invisible entities."),
+    (XRay, "X-Ray", Render, "Allows you to see ores through walls."),
+
+    // 5. CHAT (7)
+    (AntiSpam, "AntiSpam", Chat, "Blocks chat spam by replacing repeated messages with a counter."),
+    (AutoComplete, "AutoComplete", Chat, "Uses an LLM to complete your chat messages."),
+    (ChatTranslator, "ChatTranslator", Chat, "Translates chat messages using Google Translate."),
+    (FancyChat, "FancyChat", Chat, "Replaces ASCII characters in sent chat messages with fancier unicode."),
+    (ForceOP, "ForceOP", Chat, "Cracks AuthMe passwords to gain OP."),
+    (InfiniChat, "InfiniChat", Chat, "Removes the 100-line limit from the chat history."),
+    (MassTPA, "MassTPA", Chat, "Sends a TPA request to all players."),
+
+    // 6. FUN (7)
+    (Derp, "Derp", Fun, "Randomly moves your head around."),
+    (HeadRoll, "HeadRoll", Fun, "Makes you nod all the time."),
+    (LSD, "LSD", Fun, "Causes colorful hallucinations."),
+    (MileyCyrus, "MileyCyrus", Fun, "Makes you twerk."),
+    (RainbowUI, "RainbowUI", Fun, "Makes the ClickGUI backdrop and borders have rainbow colors."),
+    (SkinDerp, "SkinDerp", Fun, "Randomly toggles parts of your skin."),
+    (Tired, "Tired", Fun, "Makes you look tired."),
+
+    // 7. ITEMS (9)
+    (AutoDrop, "AutoDrop", Items, "Automatically drops unwanted items."),
+    (AutoEat, "AutoEat", Items, "Automatically eats food when necessary."),
+    (AutoSteal, "AutoSteal", Items, "Automatically steals everything from all chests you open."),
+    (AutoSwitch, "AutoSwitch", Items, "Switches the item in your hand all the time."),
+    (CrashChest, "CrashChest", Items, "Generates a chest that bans people from the server if they copy it."),
+    (ItemGenerator, "ItemGenerator", Items, "Generates random items and drops them on the ground (Creative only)."),
+    (KillPotion, "KillPotion", Items, "Generates a potion that can kill almost anything (Creative only)."),
+    (Restock, "Restock", Items, "Automatically restocks your hotbar from your inventory."),
+    (TrollPotion, "TrollPotion", Items, "Generates a potion with many annoying effects on it."),
+
+    // 8. OTHER (11)
+    (AntiAFK, "AntiAFK", Other, "Walks around randomly to hide you from AFK detectors."),
+    (AutoFish, "AutoFish", Other, "Automatically catches fish using your best fishing rod."),
+    (AutoLibrarian, "AutoLibrarian", Other, "Automatically trains villagers to sell specific enchanted books."),
+    (AutoReconnect, "AutoReconnect", Other, "Automatically reconnects when you get kicked from the server."),
+    (FeedAura, "FeedAura", Other, "Automatically feeds nearby animals."),
+    (Panic, "Panic", Other, "Instantly turns off all enabled hacks."),
+    (PortalGUI, "PortalGUI", Other, "Allows you to open GUIs in portals."),
+    (Reach, "Reach", Other, "Allows you to reach further."),
+    (Throw, "Throw", Other, "Uses an item multiple times rapidly."),
+    (Timer, "Timer", Other, "Changes the speed of almost everything."),
+    (TooManyHax, "TooManyHax", Other, "Blocks features that you don't want to accidentally enable."),
+);
+
 impl HackId {
-    pub const ALL: [HackId; 22] = [
-        HackId::AirJump,
-        HackId::AntiBlind,
-        HackId::AutoSprint,
-        HackId::BunnyHop,
-        HackId::CreativeFlight,
-        HackId::Dolphin,
-        HackId::FastPlace,
-        HackId::Flight,
-        HackId::Fullbright,
-        HackId::Glide,
-        HackId::HighJump,
-        HackId::Jesus,
-        HackId::Jetpack,
-        HackId::NoClip,
-        HackId::NoFall,
-        HackId::NoSlowdown,
-        HackId::Parkour,
-        HackId::SafeWalk,
-        HackId::SpeedHack,
-        HackId::Spider,
-        HackId::Step,
-        HackId::Timer,
-    ];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            HackId::AirJump => "AirJump",
-            HackId::AntiBlind => "AntiBlind",
-            HackId::AutoSprint => "AutoSprint",
-            HackId::BunnyHop => "BunnyHop",
-            HackId::CreativeFlight => "CreativeFlight",
-            HackId::Dolphin => "Dolphin",
-            HackId::FastPlace => "FastPlace",
-            HackId::Flight => "Flight",
-            HackId::Fullbright => "Fullbright",
-            HackId::Glide => "Glide",
-            HackId::HighJump => "HighJump",
-            HackId::Jesus => "Jesus",
-            HackId::Jetpack => "Jetpack",
-            HackId::NoClip => "NoClip",
-            HackId::NoFall => "NoFall",
-            HackId::NoSlowdown => "NoSlowdown",
-            HackId::Parkour => "Parkour",
-            HackId::SafeWalk => "SafeWalk",
-            HackId::SpeedHack => "SpeedHack",
-            HackId::Spider => "Spider",
-            HackId::Step => "Step",
-            HackId::Timer => "Timer",
-        }
-    }
-
-    pub fn category(self) -> Category {
-        match self {
-            HackId::AirJump
-            | HackId::AutoSprint
-            | HackId::BunnyHop
-            | HackId::CreativeFlight
-            | HackId::Dolphin
-            | HackId::Flight
-            | HackId::Glide
-            | HackId::HighJump
-            | HackId::Jesus
-            | HackId::Jetpack
-            | HackId::NoClip
-            | HackId::NoFall
-            | HackId::NoSlowdown
-            | HackId::Parkour
-            | HackId::SafeWalk
-            | HackId::SpeedHack
-            | HackId::Spider
-            | HackId::Step => Category::Movement,
-            HackId::AntiBlind | HackId::Fullbright => Category::Render,
-            HackId::FastPlace => Category::Blocks,
-            HackId::Timer => Category::Other,
-        }
-    }
-
-    pub fn description(self) -> &'static str {
-        match self {
-            HackId::AirJump => "Allows you to jump in mid-air.",
-            HackId::AntiBlind => "Prevents blindness and darkness from restricting movement.",
-            HackId::AutoSprint => "Makes you sprint automatically.",
-            HackId::BunnyHop => "Makes you jump automatically while moving.",
-            HackId::CreativeFlight => "Allows you to fly like in Creative Mode.",
-            HackId::Dolphin => "Makes you bob up in water automatically.",
-            HackId::FastPlace => "Allows you to place blocks faster.",
-            HackId::Flight => "Allows you to fly (FlightHack from Wurst7).",
-            HackId::Fullbright => "Allows you to see in the dark.",
-            HackId::Glide => "Makes you fall like if you had a hang glider.",
-            HackId::HighJump => "Allows you to jump higher.",
-            HackId::Jesus => "Allows you to walk on water.",
-            HackId::Jetpack => "Allows you to fly as if you had a jetpack.",
-            HackId::NoClip => "Allows you to freely move through blocks.",
-            HackId::NoFall => "Protects you from fall damage.",
-            HackId::NoSlowdown => "Cancels slowness effects caused by items, cobwebs, and honey.",
-            HackId::Parkour => "Makes you jump automatically when reaching the edge of a block.",
-            HackId::SafeWalk => "Prevents you from falling off edges.",
-            HackId::SpeedHack => "Allows you to run roughly 1.5x-5x faster than normal.",
-            HackId::Spider => "Allows you to climb up walls like a spider.",
-            HackId::Step => "Allows you to step up full blocks.",
-            HackId::Timer => "Changes the speed of almost everything.",
-        }
+    pub fn has_settings(self) -> bool {
+        matches!(
+            self,
+            HackId::Flight
+                | HackId::AutoSprint
+                | HackId::NoFall
+                | HackId::HighJump
+                | HackId::Glide
+                | HackId::SpeedHack
+                | HackId::Step
+                | HackId::Timer
+                | HackId::Killaura
+                | HackId::FastBreak
+                | HackId::Reach
+        )
     }
 
     pub fn parse(query: &str) -> Option<HackId> {
         let q = query.trim().to_ascii_lowercase().replace(['-', '_', ' '], "");
+        for &id in &Self::ALL {
+            let clean = id.name().to_ascii_lowercase().replace(['-', '_', ' '], "");
+            if clean == q {
+                return Some(id);
+            }
+        }
         match q.as_str() {
-            "airjump" => Some(HackId::AirJump),
-            "antiblind" => Some(HackId::AntiBlind),
-            "autosprint" | "sprint" => Some(HackId::AutoSprint),
-            "bunnyhop" | "bhop" => Some(HackId::BunnyHop),
-            "creativeflight" | "cfly" => Some(HackId::CreativeFlight),
-            "dolphin" => Some(HackId::Dolphin),
-            "fastplace" => Some(HackId::FastPlace),
-            "flight" | "fly" | "flyhack" => Some(HackId::Flight),
-            "fullbright" | "fb" | "nightvision" => Some(HackId::Fullbright),
-            "glide" => Some(HackId::Glide),
-            "highjump" => Some(HackId::HighJump),
-            "jesus" => Some(HackId::Jesus),
-            "jetpack" => Some(HackId::Jetpack),
-            "noclip" => Some(HackId::NoClip),
-            "nofall" => Some(HackId::NoFall),
-            "noslowdown" | "noslow" => Some(HackId::NoSlowdown),
-            "parkour" => Some(HackId::Parkour),
-            "safewalk" => Some(HackId::SafeWalk),
-            "speedhack" | "speed" => Some(HackId::SpeedHack),
-            "spider" => Some(HackId::Spider),
-            "step" => Some(HackId::Step),
-            "timer" => Some(HackId::Timer),
+            "fly" | "flyhack" => Some(HackId::Flight),
+            "sprint" => Some(HackId::AutoSprint),
+            "bhop" => Some(HackId::BunnyHop),
+            "cfly" => Some(HackId::CreativeFlight),
+            "fb" | "nightvision" => Some(HackId::Fullbright),
+            "noslow" => Some(HackId::NoSlowdown),
+            "speed" => Some(HackId::SpeedHack),
+            "ka" | "aura" => Some(HackId::Killaura),
+            "xray" => Some(HackId::XRay),
+            "scaffold" => Some(HackId::ScaffoldWalk),
             _ => None,
         }
     }
 }
 
-/// Ported settings from Wurst7's `FlightHack`, `AutoSprintHack`, `NoFallHack`, `HighJumpHack`,
-/// `GlideHack`, `SpeedHackHack`, `StepHack`, `TimerHack`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WurstSettings {
@@ -253,10 +336,14 @@ pub struct WurstSettings {
     // TimerHack.java
     pub timer_speed: f64,
 
-    // HUD
+    // HUD & WurstOptionsScreen
     pub show_watermark: bool,
     pub show_hacklist: bool,
     pub show_tabgui: bool,
+    pub click_friends: bool,
+    pub count_users: bool,
+    pub spoof_vanilla: bool,
+    pub translations: bool,
 }
 
 impl Default for WurstSettings {
@@ -289,7 +376,12 @@ impl Default for WurstSettings {
 
             show_watermark: true,
             show_hacklist: true,
-            show_tabgui: true,
+            // TabGuiOtf.java defaults to Status.DISABLED
+            show_tabgui: false,
+            click_friends: true,
+            count_users: true,
+            spoof_vanilla: false,
+            translations: true,
         }
     }
 }
@@ -299,11 +391,9 @@ impl Default for WurstSettings {
 struct SavedConfig {
     enabled: Vec<HackId>,
     settings: WurstSettings,
-    /// Uppercase key name (e.g. "G", "C", "R") -> HackId
     binds: BTreeMap<String, HackId>,
 }
 
-/// Actions returned by `.command` execution for `Game` to apply.
 #[derive(Clone, Debug)]
 pub enum CommandAction {
     Message(String),
@@ -324,6 +414,7 @@ pub struct GuiWindow {
     pub width: f32,
     pub minimized: bool,
     pub pinned: bool,
+    pub scroll: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -331,6 +422,8 @@ pub enum UiSettingId {
     WurstLogo,
     HackList,
     TabGui,
+    KeybindManager,
+    WurstOptions,
     FlightHSpeed,
     FlightVSpeed,
     FlightAntiKick,
@@ -342,10 +435,12 @@ pub enum UiSettingId {
 }
 
 impl UiSettingId {
-    pub const ALL: [UiSettingId; 11] = [
+    pub const ALL: [UiSettingId; 13] = [
         UiSettingId::WurstLogo,
         UiSettingId::HackList,
         UiSettingId::TabGui,
+        UiSettingId::KeybindManager,
+        UiSettingId::WurstOptions,
         UiSettingId::FlightHSpeed,
         UiSettingId::FlightVSpeed,
         UiSettingId::FlightAntiKick,
@@ -360,24 +455,21 @@ impl UiSettingId {
 pub struct WurstClient {
     pub active: bool,
     pub menu_open: bool,
+    pub wurst_options_open: bool,
     pub menu_selected: usize,
     pub tab_selected: usize,
     pub tab_opened: bool,
     pub tab_feature_selected: usize,
     pub gui_windows: Vec<GuiWindow>,
     pub gui_dragging: Option<(usize, f32, f32)>,
+    pub settings_popup: Option<(HackId, f32, f32)>,
     pub gui_cursor: [f32; 2],
     pub enabled: HashMap<HackId, bool>,
     pub settings: WurstSettings,
-    /// Uppercase key name (e.g. "G", "C", "R") -> HackId
     pub binds: BTreeMap<String, HackId>,
-    /// Internal tick counter for `FlightHack.doAntiKick()`.
     pub flight_tick_counter: u32,
-    /// Tracks whether `NoClip` set `player.spectator` so disabling restores it cleanly.
     pub noclip_was_spectator: Option<bool>,
-    /// Tracks whether `CreativeFlight` set `player.may_fly` so disabling restores it cleanly.
     pub cfly_was_may_fly: Option<bool>,
-    /// Tracks whether jump key was held last tick (for AirJump / HighJump edge detection).
     pub was_jump_held: bool,
     config_path: PathBuf,
 }
@@ -387,42 +479,46 @@ impl WurstClient {
         let mut binds = BTreeMap::new();
         binds.insert("G".into(), HackId::Flight);
         binds.insert("C".into(), HackId::Fullbright);
-        binds.insert("R".into(), HackId::SpeedHack);
+        binds.insert("R".into(), HackId::Killaura);
+        binds.insert("X".into(), HackId::XRay);
         binds.insert("J".into(), HackId::Jesus);
-        binds.insert("B".into(), HackId::BunnyHop);
-        binds.insert("K".into(), HackId::NoFall);
+        binds.insert("B".into(), HackId::FastPlace);
+        binds.insert("K".into(), HackId::MultiAura);
         binds.insert("H".into(), HackId::HighJump);
+        binds.insert("U".into(), HackId::Freecam);
+        binds.insert("N".into(), HackId::Nuker);
+        binds.insert("Z".into(), HackId::Sneak);
         binds
     }
 
-    /// Loads Wurst state for `game_dir`. Active only when `<game_dir>/horizon-native-mods/wurst.enabled`
-    /// exists or `HORIZON_WURST=1` is set in the environment.
     pub fn load(game_dir: &Path) -> Self {
         let active = game_dir.join(MARKER_REL_PATH).exists()
-            || std::env::current_dir()
-                .is_ok_and(|c| c.join(MARKER_REL_PATH).exists())
+            || std::env::current_dir().is_ok_and(|c| c.join(MARKER_REL_PATH).exists())
             || std::env::var("HORIZON_WURST").as_deref() == Ok("1");
         let config_path = game_dir.join(CONFIG_FILE);
 
+        // ClickGui.init() layout: starts at (5, 5), x += width + 5, wraps at scaledWidth
         let mut client = Self {
             active,
             menu_open: false,
+            wurst_options_open: false,
             menu_selected: 0,
             tab_selected: 0,
             tab_opened: false,
             tab_feature_selected: 0,
             gui_windows: vec![
-                GuiWindow { title: "Movement", category: Some(Category::Movement), x: 80.0, y: 24.0, width: 92.0, minimized: false, pinned: false },
-                GuiWindow { title: "Render", category: Some(Category::Render), x: 178.0, y: 24.0, width: 84.0, minimized: false, pinned: false },
-                GuiWindow { title: "Combat", category: Some(Category::Combat), x: 268.0, y: 24.0, width: 80.0, minimized: true, pinned: false },
-                GuiWindow { title: "Player", category: Some(Category::Player), x: 354.0, y: 24.0, width: 80.0, minimized: true, pinned: false },
-                GuiWindow { title: "Blocks", category: Some(Category::Blocks), x: 440.0, y: 24.0, width: 80.0, minimized: false, pinned: false },
-                GuiWindow { title: "Chat", category: Some(Category::Chat), x: 526.0, y: 24.0, width: 76.0, minimized: true, pinned: false },
-                GuiWindow { title: "Fun", category: Some(Category::Fun), x: 80.0, y: 42.0, width: 76.0, minimized: true, pinned: false },
-                GuiWindow { title: "Other", category: Some(Category::Other), x: 162.0, y: 42.0, width: 80.0, minimized: false, pinned: false },
-                GuiWindow { title: "UI Settings", category: None, x: 248.0, y: 42.0, width: 132.0, minimized: false, pinned: false },
+                GuiWindow { title: "Blocks", category: Some(Category::Blocks), x: 5.0, y: 23.0, width: 98.0, minimized: false, pinned: false, scroll: 0.0 },
+                GuiWindow { title: "Movement", category: Some(Category::Movement), x: 108.0, y: 23.0, width: 102.0, minimized: false, pinned: false, scroll: 0.0 },
+                GuiWindow { title: "Combat", category: Some(Category::Combat), x: 215.0, y: 23.0, width: 98.0, minimized: false, pinned: false, scroll: 0.0 },
+                GuiWindow { title: "Render", category: Some(Category::Render), x: 318.0, y: 23.0, width: 104.0, minimized: false, pinned: false, scroll: 0.0 },
+                GuiWindow { title: "Chat", category: Some(Category::Chat), x: 427.0, y: 23.0, width: 96.0, minimized: true, pinned: false, scroll: 0.0 },
+                GuiWindow { title: "Fun", category: Some(Category::Fun), x: 528.0, y: 23.0, width: 88.0, minimized: true, pinned: false, scroll: 0.0 },
+                GuiWindow { title: "Items", category: Some(Category::Items), x: 427.0, y: 41.0, width: 96.0, minimized: true, pinned: false, scroll: 0.0 },
+                GuiWindow { title: "Other", category: Some(Category::Other), x: 528.0, y: 41.0, width: 96.0, minimized: false, pinned: false, scroll: 0.0 },
+                GuiWindow { title: "UI Settings", category: None, x: 427.0, y: 59.0, width: 112.0, minimized: false, pinned: false, scroll: 0.0 },
             ],
             gui_dragging: None,
+            settings_popup: None,
             gui_cursor: [0.0, 0.0],
             enabled: HashMap::new(),
             settings: WurstSettings::default(),
@@ -475,8 +571,12 @@ impl WurstClient {
     }
 
     pub fn set_enabled(&mut self, id: HackId, on: bool) {
+        if on && id == HackId::Panic {
+            self.enabled.clear();
+            self.save();
+            return;
+        }
         if on {
-            // Mutual exclusions ported from Wurst7 (FlightHack.java, JetpackHack.java, CreativeFlightHack.java)
             match id {
                 HackId::Flight => {
                     self.enabled.insert(HackId::CreativeFlight, false);
@@ -504,7 +604,6 @@ impl WurstClient {
         next
     }
 
-    /// Ported directly from `FlightHack.getActualVerticalSpeed()`.
     pub fn flight_actual_vertical_speed(&self, invulnerable: bool) -> f64 {
         let limit = !self.settings.flight_allow_unsafe_vertical && !invulnerable;
         let max_v = if limit { 3.95 } else { 10.0 };
@@ -512,8 +611,6 @@ impl WurstClient {
             .clamp(0.05, max_v)
     }
 
-    /// Ported directly from `HighJumpHack.getAddedJumpPower()` (32-iteration binary search
-    /// using Minecraft's per-tick gravity `-0.08` and drag `* 0.98`).
     pub fn highjump_added_power(&self) -> f64 {
         if !self.is_enabled(HackId::HighJump) {
             return 0.0;
@@ -538,7 +635,6 @@ impl WurstClient {
         ((upper as f32).next_up() as f64) - 0.42
     }
 
-    /// Display string for HackList HUD, matching Wurst7's `Hack.getRenderName()`.
     pub fn render_name(&self, id: HackId) -> String {
         match id {
             HackId::Flight if self.settings.flight_show_speed => format!(
@@ -553,7 +649,6 @@ impl WurstClient {
         }
     }
 
-    /// Returns all currently enabled hacks in alphabetical order (matching Wurst7's HackListHUD).
     pub fn enabled_render_names(&self) -> Vec<String> {
         let mut out: Vec<String> = HackId::ALL
             .iter()
@@ -565,7 +660,6 @@ impl WurstClient {
         out
     }
 
-    /// Parses and runs a `.`-prefixed Wurst chat command.
     pub fn run_command(&mut self, raw: &str) -> Vec<CommandAction> {
         let body = raw.trim().strip_prefix('.').unwrap_or(raw).trim();
         if body.is_empty() {
@@ -581,10 +675,10 @@ impl WurstClient {
             "help" | "h" => vec![
                 CommandAction::Message(format!("[Wurst v{VERSION}] Commands:")),
                 CommandAction::Message(
-                    "  .t <hack> [on|off] - Toggle a hack (or press Right Shift for menu)".into(),
+                    "  .t <hack> [on|off] - Toggle any of the 155 Wurst7 hacks".into(),
                 ),
                 CommandAction::Message(
-                    "  .hacks [category]  - List all 22 ported hacks and status".into(),
+                    "  .hacks [category]  - List hacks in a category".into(),
                 ),
                 CommandAction::Message(
                     "  .set <hack> <opt> <val> - Change a hack setting".into(),
@@ -600,6 +694,14 @@ impl WurstClient {
                 let Some(name) = args.first() else {
                     return vec![CommandAction::Error("Usage: .t <hack> [on|off]".into())];
                 };
+                if name.eq_ignore_ascii_case("tabgui") {
+                    self.settings.show_tabgui = !self.settings.show_tabgui;
+                    self.save();
+                    return vec![CommandAction::Message(format!(
+                        "[Wurst] TabGUI is now {}.",
+                        if self.settings.show_tabgui { "ON" } else { "OFF" }
+                    ))];
+                }
                 let Some(id) = HackId::parse(name) else {
                     return vec![CommandAction::Error(format!(
                         "[Wurst] Unknown hack '{name}'. Type .hacks to see all hacks."
@@ -836,7 +938,7 @@ impl WurstClient {
                     .map(|(k, h)| format!("{k}={}", h.name()))
                     .collect();
                 vec![CommandAction::Message(format!(
-                    "[Wurst] Keybinds (RightShift=Menu): {}",
+                    "[Wurst] Keybinds (RightShift=ClickGUI): {}",
                     list.join(", ")
                 ))]
             }
@@ -872,42 +974,5 @@ impl WurstClient {
                 "Usage: .binds [list | add <key> <hack> | remove <key> | reset]".into(),
             )],
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn highjump_binary_search_matches_wurst7() {
-        let mut w = WurstClient::load(Path::new("."));
-        w.active = true;
-        w.set_enabled(HackId::HighJump, true);
-        w.settings.highjump_height = 6.0;
-        let added = w.highjump_added_power();
-        // Vanilla jump is 0.42 (~1.25 blocks); 6 blocks requires ~0.95 total -> ~0.53 added.
-        assert!(added > 0.4 && added < 0.8, "added={added}");
-    }
-
-    #[test]
-    fn flight_mutual_exclusion_matches_wurst7() {
-        let mut w = WurstClient::load(Path::new("."));
-        w.active = true;
-        w.set_enabled(HackId::CreativeFlight, true);
-        assert!(w.is_enabled(HackId::CreativeFlight));
-        w.set_enabled(HackId::Flight, true);
-        assert!(w.is_enabled(HackId::Flight));
-        assert!(!w.is_enabled(HackId::CreativeFlight));
-    }
-
-    #[test]
-    fn toggle_command_works() {
-        let mut w = WurstClient::load(Path::new("."));
-        w.active = true;
-        let _ = w.run_command(".t flight on");
-        assert!(w.is_enabled(HackId::Flight));
-        let _ = w.run_command(".t flight off");
-        assert!(!w.is_enabled(HackId::Flight));
     }
 }

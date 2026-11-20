@@ -467,6 +467,9 @@ impl Game<'_> {
             } else {
                 ui::button(batch, atlas, x, y, bw, 20.0, &label, active, hover);
             }
+            if id == 29 {
+                Self::draw_wurst_logo(batch, atlas, x + 34.0, y + 2.0, 63.0 / 72.0, 16.0 / 18.0);
+            }
             // PauseScreen's customAdditions button: CUSTOM_OPTIONS_TOOLTIP.
             if (id == 11 || id == 14) && hover {
                 tooltip = Some(Text::translate("menu.custom_options.tooltip", &[]));
@@ -583,9 +586,7 @@ impl Game<'_> {
             }
             29 => {
                 self.pause_focus = None;
-                self.set_screen(Screen::Playing);
-                self.wurst.menu_open = true;
-                self.wurst.gui_dragging = None;
+                self.wurst.wurst_options_open = true;
                 self.capture(false);
             }
             2 => self.close_world()?,
@@ -606,7 +607,7 @@ impl Game<'_> {
             .map(|(i, page)| (page.title(), ADDED_PAGES + i as u8));
         self.wurst
             .active
-            .then_some(("Wurst Options", 29))
+            .then_some(("            Options", 29))
             .into_iter()
             .chain(split.then_some((SPLIT_SETTINGS, 30)))
             .chain(added)

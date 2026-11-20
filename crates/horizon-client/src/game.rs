@@ -5135,8 +5135,10 @@ impl Game<'_> {
             self.draw_book(&mut batch);
         }
         self.draw_studio_bars(&mut batch);
-        if show_hud {
+        if show_hud || self.wurst.wurst_options_open {
             self.draw_wurst_hud(&mut batch);
+        }
+        if show_hud {
             self.draw_pad_guide(&mut batch, guide_from);
         }
         batch
@@ -9299,7 +9301,7 @@ impl Game<'_> {
                         if self.screen == Screen::DebugOptions {
                             self.debug_options_drag();
                         }
-                        if self.wurst.menu_open {
+                        if self.wurst.menu_open || self.wurst.wurst_options_open {
                             self.handle_wurst_mouse_move(self.cursor.0, self.cursor.1);
                         }
                         if self.screen == Screen::HudEditor {
@@ -9468,6 +9470,9 @@ impl Game<'_> {
                     }
                     if self.screen == Screen::DebugOptions && d != 0.0 {
                         self.debug_options_scroll(d);
+                    }
+                    if d != 0.0 && self.handle_wurst_scroll(d) {
+                        return Ok(());
                     }
                     if self.screen == Screen::HudEditor && d != 0.0 {
                         self.hud_editor_scroll(f64::from(d));

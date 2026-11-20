@@ -164,7 +164,8 @@ impl Game<'_> {
             keeps_pointer: self.server_packs.prompt.is_some()
                 || self.dialog_open()
                 || self.command_prompt.is_some()
-                || self.wurst.menu_open,
+                || self.wurst.menu_open
+                || self.wurst.wurst_options_open,
         }) {
             return;
         }
