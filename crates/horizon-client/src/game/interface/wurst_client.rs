@@ -389,7 +389,11 @@ impl Game<'_> {
         if self.wurst.wurst_options_open {
             if key == KeyCode::Escape {
                 self.wurst.wurst_options_open = false;
-                self.set_screen(Screen::Paused);
+                if self.wurst.wurst_options_from_pause {
+                    self.set_screen(Screen::Paused);
+                } else {
+                    self.capture(true);
+                }
                 return true;
             }
             return true;
@@ -571,6 +575,7 @@ impl Game<'_> {
             }
             UiSettingId::WurstOptions => {
                 self.wurst.menu_open = false;
+                self.wurst.wurst_options_from_pause = false;
                 self.wurst.wurst_options_open = true;
                 self.capture(false);
             }
@@ -639,6 +644,33 @@ impl Game<'_> {
         let title_h = 13.0_f32;
         let row_step = 13.0_f32;
 
+        // Check SettingsWindow popup first (top-most)
+        if let Some((sid, sx, sy)) = self.wurst.settings_popup {
+            let sw = 140.0_f32;
+            let items = Self::hack_settings(sid);
+            let sh = title_h + 2.0 + (items.len().max(1) as f32) * row_step;
+            if mx >= sx && mx <= sx + sw && my >= sy && my <= sy + sh {
+                if my <= sy + title_h {
+                    // Red X close button at [sx + sw - 11 .. sx + sw - 2]
+                    if button == MouseButton::Left && mx >= sx + sw - 11.0 {
+                        self.wurst.settings_popup = None;
+                        self.audio.play_button_click();
+                    }
+                    return true;
+                }
+                let rel_y = my - (sy + title_h + 2.0);
+                if rel_y >= 0.0 {
+                    let row = (rel_y / row_step) as usize;
+                    if let Some(&ui_id) = items.get(row) {
+                        let delta = if button == MouseButton::Right { -1.0 } else { 1.0 };
+                        self.step_ui_setting(ui_id, delta);
+                        self.audio.play_button_click();
+                    }
+                }
+                return true;
+            }
+        }
+
         for idx in (0..self.wurst.gui_windows.len()).rev() {
             let win = self.wurst.gui_windows[idx].clone();
             if mx < win.x || mx > win.x + win.width || my < win.y {
@@ -677,7 +709,21 @@ impl Game<'_> {
                             && let Some(&id) = hacks.get(row)
                             && button == MouseButton::Left
                         {
-                            self.wurst.toggle(id);
+                            if id.has_settings() && mx > win.x + win.width - 15.0 {
+                                if self.wurst.settings_popup.is_some_and(|(cur, _, _)| cur == id) {
+                                    self.wurst.settings_popup = None;
+                                } else {
+                                    let (sw, _) = self.gui_size();
+                                    let mut px = win.x + win.width + 5.0;
+                                    if px + 140.0 > sw {
+                                        px = (win.x - 145.0).max(4.0);
+                                    }
+                                    let py = (win.y + 12.0 + (row as f32) * row_step + win.scroll).max(4.0);
+                                    self.wurst.settings_popup = Some((id, px, py));
+                                }
+                            } else {
+                                self.wurst.toggle(id);
+                            }
                             self.audio.play_button_click();
                         }
                     }
@@ -798,11 +844,27 @@ impl Game<'_> {
         batch.fill(atlas, x2 - 1.0, y1, 1.0, h, color);
     }
 
+    fn hack_settings(id: HackId) -> Vec<UiSettingId> {
+        match id {
+            HackId::Flight => vec![
+                UiSettingId::FlightHSpeed,
+                UiSettingId::FlightVSpeed,
+                UiSettingId::FlightAntiKick,
+            ],
+            HackId::SpeedHack => vec![UiSettingId::SpeedMultiplier],
+            HackId::HighJump => vec![UiSettingId::HighJumpHeight],
+            HackId::Step => vec![UiSettingId::StepHeight],
+            HackId::Timer => vec![UiSettingId::TimerSpeed],
+            HackId::Glide => vec![UiSettingId::GlideFallSpeed],
+            _ => vec![],
+        }
+    }
+
     fn click_wurst_options(&mut self) {
         let (w, h) = self.gui_size();
         let mx = w * 0.5;
         let y0 = h * 0.25 - 16.0;
-        let cur = (self.wurst.gui_cursor[0], self.wurst.gui_cursor[1]);
+        let cur = self.cursor;
 
         // Column 1: Settings (x = mx - 154, w = 100, h = 20)
         let x1 = mx - 154.0;
@@ -874,7 +936,11 @@ impl Game<'_> {
         if horizon_client::ui::hovered(cur, mx - 100.0, h * 0.25 + 128.0, 200.0, 20.0) {
             self.audio.play_button_click();
             self.wurst.wurst_options_open = false;
-            self.set_screen(Screen::Paused);
+            if self.wurst.wurst_options_from_pause {
+                self.set_screen(Screen::Paused);
+            } else {
+                self.capture(true);
+            }
         }
     }
 
@@ -883,7 +949,7 @@ impl Game<'_> {
         let (w, h) = (batch.width, batch.height);
         let mx = w * 0.5;
         let y0 = h * 0.25 - 16.0;
-        let cur = (self.wurst.gui_cursor[0], self.wurst.gui_cursor[1]);
+        let cur = self.cursor;
 
         horizon_client::ui::menu_background(batch, atlas, 0.0, 0.0, w, h, true);
 
@@ -925,8 +991,8 @@ impl Game<'_> {
                 bw,
                 20.0,
                 &Text::literal(label),
-                hov,
                 true,
+                hov,
             );
         };
 
@@ -1077,11 +1143,26 @@ impl Game<'_> {
                 let hacks = Self::window_hacks(cats[self.wurst.tab_selected]);
                 if !hacks.is_empty() {
                     let sx = tx + tw + 2.0;
-                    let sw = 84.0_f32;
-                    let sh = (hacks.len() as f32) * 10.0;
+                    let sw = hacks
+                        .iter()
+                        .map(|h| HudBatch::text_width(atlas, h.name()) + 14.0)
+                        .fold(64.0_f32, f32::max);
+                    let max_rows = 15usize;
+                    let total = hacks.len();
+                    let start = if total > max_rows {
+                        self.wurst
+                            .tab_feature_selected
+                            .saturating_sub(max_rows / 2)
+                            .min(total - max_rows)
+                    } else {
+                        0
+                    };
+                    let visible = (total - start).min(max_rows);
+                    let sh = (visible as f32) * 10.0;
                     batch.fill(atlas, sx, ty, sw, sh, bg_color);
                     Self::draw_border_2d(batch, atlas, sx, ty, sx + sw, ty + sh, outline_color);
-                    for (i, &id) in hacks.iter().enumerate() {
+                    for (vi, &id) in hacks[start..start + visible].iter().enumerate() {
+                        let i = start + vi;
                         let prefix = if i == self.wurst.tab_feature_selected { ">" } else { "" };
                         let label = format!("{prefix}{}", id.name());
                         let color = if self.wurst.is_enabled(id) {
@@ -1093,7 +1174,7 @@ impl Game<'_> {
                             atlas,
                             &Text::literal(label),
                             sx + 2.0,
-                            ty + 1.0 + (i as f32) * 10.0,
+                            ty + 1.0 + (vi as f32) * 10.0,
                             color,
                             false,
                         );
@@ -1116,6 +1197,33 @@ impl Game<'_> {
         let [mx, my] = self.wurst.gui_cursor;
         let title_h = 13.0_f32;
         let row_step = 13.0_f32;
+
+        // Check SettingsWindow popup first (top-most)
+        if let Some((sid, sx, sy)) = self.wurst.settings_popup {
+            let sw = 140.0_f32;
+            let items = Self::hack_settings(sid);
+            let sh = title_h + 2.0 + (items.len().max(1) as f32) * row_step;
+            if mx >= sx && mx <= sx + sw && my >= sy && my <= sy + sh {
+                if my <= sy + title_h {
+                    // Red X close button at [sx + sw - 11 .. sx + sw - 2]
+                    if button == MouseButton::Left && mx >= sx + sw - 11.0 {
+                        self.wurst.settings_popup = None;
+                        self.audio.play_button_click();
+                    }
+                    return true;
+                }
+                let rel_y = my - (sy + title_h + 2.0);
+                if rel_y >= 0.0 {
+                    let row = (rel_y / row_step) as usize;
+                    if let Some(&ui_id) = items.get(row) {
+                        let delta = if button == MouseButton::Right { -1.0 } else { 1.0 };
+                        self.step_ui_setting(ui_id, delta);
+                        self.audio.play_button_click();
+                    }
+                }
+                return true;
+            }
+        }
         let mut tooltip: Option<&'static str> = None;
 
         for win in &self.wurst.gui_windows {
@@ -1303,6 +1411,68 @@ impl Game<'_> {
                 batch.fill(atlas, x1, y3, win.width, 1.0, outline_color);
                 Self::draw_border_2d(batch, atlas, x1, y1, x2, y2, outline_color);
             }
+        }
+
+        // SettingsWindow popup (spawned by clicking the 11x11 settings arrow)
+        if self.wurst.menu_open
+            && let Some((sid, sx, sy)) = self.wurst.settings_popup
+        {
+            let sw = 140.0_f32;
+            let items = Self::hack_settings(sid);
+            let inner_h = 2.0 + (items.len().max(1) as f32) * row_step;
+            let sy2 = sy + title_h + inner_h;
+            batch.fill(atlas, sx, sy, sw, title_h, ac_color);
+            batch.text_styled(
+                atlas,
+                &Text::literal(format!("{} Settings", sid.name())),
+                sx + 2.0,
+                sy + 3.0,
+                txt_color,
+                false,
+            );
+            // Red X close button
+            let cx1 = sx + sw - 11.0;
+            let cy1 = sy + 2.0;
+            let h_close = mx >= cx1 && mx <= cx1 + 9.0 && my >= cy1 && my <= cy1 + 9.0;
+            batch.fill(atlas, cx1, cy1, 9.0, 9.0, if h_close { bg_hover } else { bg_color });
+            batch.text_styled(
+                atlas,
+                &Text::literal("x"),
+                cx1 + 2.0,
+                cy1 + 0.5,
+                if h_close { rgba(255, 0, 0, 255) } else { rgba(217, 0, 0, 255) },
+                false,
+            );
+            Self::draw_border_2d(batch, atlas, cx1, cy1, cx1 + 9.0, cy1 + 9.0, outline_color);
+
+            batch.fill(atlas, sx, sy + title_h, sw, inner_h, bg_color);
+            for (i, &ui_id) in items.iter().enumerate() {
+                let bx1 = sx + 2.0;
+                let by1 = sy + title_h + 2.0 + (i as f32) * row_step;
+                let bw = sw - 4.0;
+                let hov = mx >= bx1 && mx <= bx1 + bw && my >= by1 && my <= by1 + 11.0;
+                let on = self.ui_setting_active(ui_id);
+                let btn_bg = match (on, hov) {
+                    (true, true) => green_hover,
+                    (true, false) => green_on,
+                    (false, true) => bg_hover,
+                    (false, false) => bg_color,
+                };
+                batch.fill(atlas, bx1, by1, bw, 11.0, btn_bg);
+                Self::draw_border_2d(batch, atlas, bx1, by1, bx1 + bw, by1 + 11.0, outline_color);
+                let lbl = self.ui_setting_label(ui_id);
+                let lw = HudBatch::text_width(atlas, &lbl);
+                batch.text_styled(
+                    atlas,
+                    &Text::literal(lbl),
+                    bx1 + (bw - lw) * 0.5,
+                    by1 + 2.0,
+                    txt_color,
+                    false,
+                );
+            }
+            batch.fill(atlas, sx, sy + title_h, sw, 1.0, outline_color);
+            Self::draw_border_2d(batch, atlas, sx, sy, sx + sw, sy2, outline_color);
         }
 
         // Hover tooltip box (ClickGui.renderTooltip)

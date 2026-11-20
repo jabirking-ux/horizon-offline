@@ -5049,7 +5049,9 @@ impl Game<'_> {
         let drawn = self.draw_screen_with_pre_hook(&mut batch);
         match screen {
             _ if !drawn => {}
-            Screen::Paused if self.pause_menu => self.draw_pause_menu(&mut batch),
+            Screen::Paused if self.pause_menu && !self.wurst.wurst_options_open => {
+                self.draw_pause_menu(&mut batch)
+            }
             // PauseScreen(false): only its title, at the top.
             Screen::Paused => {
                 self.draw_screen_phase(

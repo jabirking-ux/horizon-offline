@@ -587,6 +587,7 @@ impl Game<'_> {
             29 => {
                 self.pause_focus = None;
                 self.wurst.wurst_options_open = true;
+                self.wurst.wurst_options_from_pause = true;
                 self.capture(false);
             }
             2 => self.close_world()?,
