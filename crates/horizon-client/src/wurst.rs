@@ -336,6 +336,12 @@ pub struct WurstSettings {
     // TimerHack.java
     pub timer_speed: f64,
 
+    // KillauraHack / FastBreakHack / ReachHack
+    pub killaura_range: f64,
+    pub killaura_cps: f64,
+    pub fastbreak_speed: f64,
+    pub reach_distance: f64,
+
     // HUD & WurstOptionsScreen
     pub show_watermark: bool,
     pub show_hacklist: bool,
@@ -373,6 +379,11 @@ impl Default for WurstSettings {
             step_height: 1.0,
 
             timer_speed: 2.0,
+
+            killaura_range: 4.25,
+            killaura_cps: 10.0,
+            fastbreak_speed: 2.0,
+            reach_distance: 5.0,
 
             show_watermark: true,
             show_hacklist: true,
@@ -427,6 +438,13 @@ pub enum UiSettingId {
     FlightHSpeed,
     FlightVSpeed,
     FlightAntiKick,
+    AutoSprintOmni,
+    AutoSprintHungry,
+    NoFallMinFall,
+    KillauraRange,
+    KillauraCps,
+    FastBreakSpeed,
+    ReachDistance,
     SpeedMultiplier,
     HighJumpHeight,
     StepHeight,
@@ -456,6 +474,7 @@ pub struct WurstClient {
     pub active: bool,
     pub menu_open: bool,
     pub navigator_open: bool,
+    pub navigator_feature: Option<HackId>,
     pub navigator_query: String,
     pub navigator_scroll: usize,
     pub wurst_options_open: bool,
@@ -506,6 +525,7 @@ impl WurstClient {
             active,
             menu_open: false,
             navigator_open: false,
+            navigator_feature: None,
             navigator_query: String::new(),
             navigator_scroll: 0,
             wurst_options_open: false,

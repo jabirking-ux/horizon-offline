@@ -421,8 +421,12 @@ impl Game<'_> {
         }
         if self.wurst.navigator_open {
             match key {
+                KeyCode::Escape | KeyCode::Backspace if self.wurst.navigator_feature.is_some() => {
+                    self.wurst.navigator_feature = None;
+                }
                 KeyCode::Escape => {
                     self.wurst.navigator_open = false;
+                    self.wurst.navigator_feature = None;
                     self.capture(true);
                 }
                 KeyCode::Backspace => {
@@ -578,6 +582,29 @@ impl Game<'_> {
                 format!("Flight V: {:.2}", self.wurst.settings.flight_vertical_speed)
             }
             UiSettingId::FlightAntiKick => "Flight Anti-Kick".to_owned(),
+            UiSettingId::AutoSprintOmni => format!(
+                "OmniSprint: {}",
+                if self.wurst.settings.autosprint_omni { "ON" } else { "OFF" }
+            ),
+            UiSettingId::AutoSprintHungry => format!(
+                "HungrySprint: {}",
+                if self.wurst.settings.autosprint_hungry { "ON" } else { "OFF" }
+            ),
+            UiSettingId::NoFallMinFall => {
+                format!("Min Fall: {:.1}m", self.wurst.settings.nofall_min_fall_distance)
+            }
+            UiSettingId::KillauraRange => {
+                format!("Range: {:.2}", self.wurst.settings.killaura_range)
+            }
+            UiSettingId::KillauraCps => {
+                format!("Speed: {:.0} CPS", self.wurst.settings.killaura_cps)
+            }
+            UiSettingId::FastBreakSpeed => {
+                format!("Break Speed: {:.2}x", self.wurst.settings.fastbreak_speed)
+            }
+            UiSettingId::ReachDistance => {
+                format!("Reach: {:.2}m", self.wurst.settings.reach_distance)
+            }
             UiSettingId::SpeedMultiplier => {
                 format!("Speed: {:.2}x", self.wurst.settings.speed_multiplier)
             }
@@ -602,6 +629,8 @@ impl Game<'_> {
             UiSettingId::HackList => self.wurst.settings.show_hacklist,
             UiSettingId::TabGui => self.wurst.settings.show_tabgui,
             UiSettingId::FlightAntiKick => self.wurst.settings.flight_anti_kick,
+            UiSettingId::AutoSprintOmni => self.wurst.settings.autosprint_omni,
+            UiSettingId::AutoSprintHungry => self.wurst.settings.autosprint_hungry,
             _ => false,
         }
     }
@@ -643,6 +672,37 @@ impl Game<'_> {
             }
             UiSettingId::FlightAntiKick => {
                 self.wurst.settings.flight_anti_kick = !self.wurst.settings.flight_anti_kick;
+            }
+            UiSettingId::AutoSprintOmni => {
+                self.wurst.settings.autosprint_omni = !self.wurst.settings.autosprint_omni;
+            }
+            UiSettingId::AutoSprintHungry => {
+                self.wurst.settings.autosprint_hungry = !self.wurst.settings.autosprint_hungry;
+            }
+            UiSettingId::NoFallMinFall => {
+                let v = self.wurst.settings.nofall_min_fall_distance + delta * 0.5;
+                self.wurst.settings.nofall_min_fall_distance =
+                    if v > 10.0 { 0.0 } else { v.clamp(0.0, 10.0) };
+            }
+            UiSettingId::KillauraRange => {
+                let v = self.wurst.settings.killaura_range + delta * 0.25;
+                self.wurst.settings.killaura_range =
+                    if v > 7.0 { 3.0 } else { v.clamp(3.0, 7.0) };
+            }
+            UiSettingId::KillauraCps => {
+                let v = self.wurst.settings.killaura_cps + delta * 1.0;
+                self.wurst.settings.killaura_cps =
+                    if v > 20.0 { 1.0 } else { v.clamp(1.0, 20.0) };
+            }
+            UiSettingId::FastBreakSpeed => {
+                let v = self.wurst.settings.fastbreak_speed + delta * 0.25;
+                self.wurst.settings.fastbreak_speed =
+                    if v > 5.0 { 1.0 } else { v.clamp(1.0, 5.0) };
+            }
+            UiSettingId::ReachDistance => {
+                let v = self.wurst.settings.reach_distance + delta * 0.25;
+                self.wurst.settings.reach_distance =
+                    if v > 8.0 { 3.0 } else { v.clamp(3.0, 8.0) };
             }
             UiSettingId::SpeedMultiplier => {
                 let v = self.wurst.settings.speed_multiplier + delta * 0.25;
@@ -909,6 +969,11 @@ impl Game<'_> {
                 UiSettingId::FlightVSpeed,
                 UiSettingId::FlightAntiKick,
             ],
+            HackId::AutoSprint => vec![UiSettingId::AutoSprintOmni, UiSettingId::AutoSprintHungry],
+            HackId::NoFall => vec![UiSettingId::NoFallMinFall],
+            HackId::Killaura => vec![UiSettingId::KillauraRange, UiSettingId::KillauraCps],
+            HackId::FastBreak => vec![UiSettingId::FastBreakSpeed],
+            HackId::Reach => vec![UiSettingId::ReachDistance],
             HackId::SpeedHack => vec![UiSettingId::SpeedMultiplier],
             HackId::HighJump => vec![UiSettingId::HighJumpHeight],
             HackId::Step => vec![UiSettingId::StepHeight],
@@ -1147,6 +1212,28 @@ impl Game<'_> {
         let (w, h) = self.gui_size();
         let cur = self.cursor;
         let mx = w * 0.5;
+
+        if let Some(id) = self.wurst.navigator_feature {
+            // Primary Enable/Disable button at (mx - 151, h - 65, 302, 18)
+            if horizon_client::ui::hovered(cur, mx - 151.0, h - 65.0, 302.0, 18.0) {
+                self.wurst.toggle(id);
+                self.audio.play_button_click();
+                return;
+            }
+            // Settings rows inside NavigatorFeatureScreen
+            let items = Self::hack_settings(id);
+            let sy = 140.0_f32;
+            for (i, &ui_id) in items.iter().enumerate() {
+                let ry = sy + (i as f32) * 14.0;
+                if horizon_client::ui::hovered(cur, mx - 152.0, ry, 304.0, 12.0) {
+                    self.step_ui_setting(ui_id, 1.0);
+                    self.audio.play_button_click();
+                    return;
+                }
+            }
+            return;
+        }
+
         let list_x = mx - 154.0;
         let items = self.navigator_filtered();
         let content_h = ((items.len() / 3) as f32) * 20.0;
@@ -1166,7 +1253,12 @@ impl Game<'_> {
                 break;
             }
             if horizon_client::ui::hovered(cur, fx, fy, 100.0, 16.0) {
-                self.wurst.toggle(id);
+                // Clicking the right 16x16 arrow box opens NavigatorFeatureScreen
+                if cur.0 >= fx + 84.0 {
+                    self.wurst.navigator_feature = Some(id);
+                } else {
+                    self.wurst.toggle(id);
+                }
                 self.audio.play_button_click();
                 return;
             }
@@ -1185,6 +1277,108 @@ impl Game<'_> {
         let txt_color = rgba(240, 240, 240, 255);
         let green_on = rgba(0, 255, 0, 128);
         let green_hover = rgba(0, 255, 0, 191);
+
+        if let Some(id) = self.wurst.navigator_feature {
+            let bgx1 = mx - 154.0;
+            let bgx2 = mx + 154.0;
+            let bgy1 = 60.0;
+            let bgy2 = h - 43.0;
+            let nw = HudBatch::text_width(atlas, id.name());
+            batch.text_styled(atlas, &Text::literal(id.name()), mx - nw * 0.5, 32.0, txt_color, true);
+
+            batch.fill(atlas, bgx1, bgy1, 308.0, (bgy2 - bgy1).max(40.0), bg_color);
+            Self::draw_border_2d(batch, atlas, bgx1, bgy1, bgx2, bgy2, outline_color);
+
+            batch.text_styled(
+                atlas,
+                &Text::literal(format!("Type: Hack, Category: {}", id.category().name())),
+                bgx1 + 4.0,
+                bgy1 + 4.0,
+                txt_color,
+                false,
+            );
+            batch.text_styled(
+                atlas,
+                &Text::literal("Description:"),
+                bgx1 + 4.0,
+                bgy1 + 22.0,
+                txt_color,
+                false,
+            );
+            batch.text_styled(
+                atlas,
+                &Text::literal(id.description()),
+                bgx1 + 4.0,
+                bgy1 + 32.0,
+                txt_color,
+                false,
+            );
+
+            let items = Self::hack_settings(id);
+            if !items.is_empty() {
+                batch.text_styled(
+                    atlas,
+                    &Text::literal("Settings: (Click to change, Esc/Backspace = Back)"),
+                    bgx1 + 4.0,
+                    128.0,
+                    txt_color,
+                    false,
+                );
+                for (i, &ui_id) in items.iter().enumerate() {
+                    let ry = 140.0 + (i as f32) * 14.0;
+                    let hov = horizon_client::ui::hovered(cur, mx - 152.0, ry, 304.0, 12.0);
+                    let on = self.ui_setting_active(ui_id);
+                    let rbg = match (on, hov) {
+                        (true, true) => green_hover,
+                        (true, false) => green_on,
+                        (false, true) => bg_hover,
+                        (false, false) => bg_color,
+                    };
+                    batch.fill(atlas, mx - 152.0, ry, 304.0, 12.0, rbg);
+                    Self::draw_border_2d(batch, atlas, mx - 152.0, ry, mx + 152.0, ry + 12.0, outline_color);
+                    batch.text_styled(
+                        atlas,
+                        &Text::literal(self.ui_setting_label(ui_id)),
+                        mx - 148.0,
+                        ry + 2.0,
+                        txt_color,
+                        false,
+                    );
+                }
+            } else {
+                batch.text_styled(
+                    atlas,
+                    &Text::literal("Press Esc or Backspace to go back."),
+                    bgx1 + 4.0,
+                    128.0,
+                    rgba(180, 180, 180, 255),
+                    false,
+                );
+            }
+
+            // Primary Enable/Disable button at (mx - 151, h - 65, 302, 18)
+            let on = self.wurst.is_enabled(id);
+            let p_hov = horizon_client::ui::hovered(cur, mx - 151.0, h - 65.0, 302.0, 18.0);
+            let p_bg = match (on, p_hov) {
+                (true, true) => rgba(0, 255, 0, 64),
+                (true, false) => rgba(0, 224, 0, 64),
+                (false, true) => rgba(96, 96, 96, 64),
+                (false, false) => rgba(64, 64, 64, 64),
+            };
+            batch.fill(atlas, mx - 151.0, h - 65.0, 302.0, 18.0, p_bg);
+            Self::draw_border_2d(batch, atlas, mx - 151.0, h - 65.0, mx + 151.0, h - 47.0, outline_color);
+            let plbl = if on { "Disable" } else { "Enable" };
+            let plw = HudBatch::text_width(atlas, plbl);
+            batch.text_styled(
+                atlas,
+                &Text::literal(plbl),
+                mx - plw * 0.5,
+                h - 60.0,
+                txt_color,
+                false,
+            );
+            return;
+        }
 
         // NavigatorMainScreen.java: no dark background/blur; "Search: " at (middleX - 150, 32)
         batch.text_styled(
@@ -1328,6 +1522,108 @@ impl Game<'_> {
         let green_on = rgba(0, 255, 0, 128);
         let green_hover = rgba(0, 255, 0, 191);
 
+        if let Some(id) = self.wurst.navigator_feature {
+            let bgx1 = mx - 154.0;
+            let bgx2 = mx + 154.0;
+            let bgy1 = 60.0;
+            let bgy2 = h - 43.0;
+            let nw = HudBatch::text_width(atlas, id.name());
+            batch.text_styled(atlas, &Text::literal(id.name()), mx - nw * 0.5, 32.0, txt_color, true);
+
+            batch.fill(atlas, bgx1, bgy1, 308.0, (bgy2 - bgy1).max(40.0), bg_color);
+            Self::draw_border_2d(batch, atlas, bgx1, bgy1, bgx2, bgy2, outline_color);
+
+            batch.text_styled(
+                atlas,
+                &Text::literal(format!("Type: Hack, Category: {}", id.category().name())),
+                bgx1 + 4.0,
+                bgy1 + 4.0,
+                txt_color,
+                false,
+            );
+            batch.text_styled(
+                atlas,
+                &Text::literal("Description:"),
+                bgx1 + 4.0,
+                bgy1 + 22.0,
+                txt_color,
+                false,
+            );
+            batch.text_styled(
+                atlas,
+                &Text::literal(id.description()),
+                bgx1 + 4.0,
+                bgy1 + 32.0,
+                txt_color,
+                false,
+            );
+
+            let items = Self::hack_settings(id);
+            if !items.is_empty() {
+                batch.text_styled(
+                    atlas,
+                    &Text::literal("Settings: (Click to change, Esc/Backspace = Back)"),
+                    bgx1 + 4.0,
+                    128.0,
+                    txt_color,
+                    false,
+                );
+                for (i, &ui_id) in items.iter().enumerate() {
+                    let ry = 140.0 + (i as f32) * 14.0;
+                    let hov = horizon_client::ui::hovered(cur, mx - 152.0, ry, 304.0, 12.0);
+                    let on = self.ui_setting_active(ui_id);
+                    let rbg = match (on, hov) {
+                        (true, true) => green_hover,
+                        (true, false) => green_on,
+                        (false, true) => bg_hover,
+                        (false, false) => bg_color,
+                    };
+                    batch.fill(atlas, mx - 152.0, ry, 304.0, 12.0, rbg);
+                    Self::draw_border_2d(batch, atlas, mx - 152.0, ry, mx + 152.0, ry + 12.0, outline_color);
+                    batch.text_styled(
+                        atlas,
+                        &Text::literal(self.ui_setting_label(ui_id)),
+                        mx - 148.0,
+                        ry + 2.0,
+                        txt_color,
+                        false,
+                    );
+                }
+            } else {
+                batch.text_styled(
+                    atlas,
+                    &Text::literal("Press Esc or Backspace to go back."),
+                    bgx1 + 4.0,
+                    128.0,
+                    rgba(180, 180, 180, 255),
+                    false,
+                );
+            }
+
+            // Primary Enable/Disable button at (mx - 151, h - 65, 302, 18)
+            let on = self.wurst.is_enabled(id);
+            let p_hov = horizon_client::ui::hovered(cur, mx - 151.0, h - 65.0, 302.0, 18.0);
+            let p_bg = match (on, p_hov) {
+                (true, true) => rgba(0, 255, 0, 64),
+                (true, false) => rgba(0, 224, 0, 64),
+                (false, true) => rgba(96, 96, 96, 64),
+                (false, false) => rgba(64, 64, 64, 64),
+            };
+            batch.fill(atlas, mx - 151.0, h - 65.0, 302.0, 18.0, p_bg);
+            Self::draw_border_2d(batch, atlas, mx - 151.0, h - 65.0, mx + 151.0, h - 47.0, outline_color);
+            let plbl = if on { "Disable" } else { "Enable" };
+            let plw = HudBatch::text_width(atlas, plbl);
+            batch.text_styled(
+                atlas,
+                &Text::literal(plbl),
+                mx - plw * 0.5,
+                h - 60.0,
+                txt_color,
+                false,
+            );
+            return;
+        }
+
         // 1. WurstLogo.java (exact coordinates & wurst_128.png RLE graphic)
         if self.wurst.settings.show_watermark {
             let ver = format!(
@@ -1418,8 +1714,8 @@ impl Game<'_> {
             }
         }
 
-        // 3. HackListHUD.java: top-left below WurstLogo (or top-right) in crisp white
-        if self.wurst.settings.show_hacklist {
+        // 3. HackListHUD.java: top-left below WurstLogo (hidden while ClickGUI is open to avoid overlap)
+        if self.wurst.settings.show_hacklist && !self.wurst.menu_open {
             let active_hacks = self.wurst.enabled_render_names();
             let mut y = if self.wurst.settings.show_tabgui { 106.0 } else { 23.0 };
             for name in active_hacks {
