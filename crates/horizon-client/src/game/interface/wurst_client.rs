@@ -797,17 +797,27 @@ impl Game<'_> {
             }
             if my <= win.y + title_h {
                 if button == MouseButton::Left {
+                    let front_idx = if idx + 1 < self.wurst.gui_windows.len() {
+                        let w = self.wurst.gui_windows.remove(idx);
+                        self.wurst.gui_windows.push(w);
+                        self.wurst.gui_windows.len() - 1
+                    } else {
+                        idx
+                    };
                     // Minimize box: [x2 - 11 .. x2 - 2]
                     if mx >= win.x + win.width - 11.0 {
-                        self.wurst.gui_windows[idx].minimized = !win.minimized;
+                        self.wurst.gui_windows[front_idx].minimized = !win.minimized;
+                        self.wurst.settings_popup = None;
                     } else if mx >= win.x + win.width - 22.0 {
                         // Pin box: [x2 - 22 .. x2 - 13]
-                        self.wurst.gui_windows[idx].pinned = !win.pinned;
+                        self.wurst.gui_windows[front_idx].pinned = !win.pinned;
                     } else {
-                        self.wurst.gui_dragging = Some((idx, mx - win.x, my - win.y));
+                        self.wurst.gui_dragging = Some((front_idx, mx - win.x, my - win.y));
+                        self.wurst.settings_popup = None;
                     }
                 } else if button == MouseButton::Right {
                     self.wurst.gui_windows[idx].minimized = !win.minimized;
+                    self.wurst.settings_popup = None;
                 }
                 return true;
             }
