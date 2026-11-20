@@ -2231,9 +2231,9 @@ impl Game<'_> {
             let px = p.position.x.floor() as i32;
             let py = p.position.y.floor() as i32;
             let pz = p.position.z.floor() as i32;
-            for bx in (px - 12)..=(px + 12) {
-                for by in (py - 8)..=(py + 8) {
-                    for bz in (pz - 12)..=(pz + 12) {
+            for bx in (px - 24)..=(px + 24) {
+                for by in (py - 12)..=(py + 12) {
+                    for bz in (pz - 24)..=(pz + 24) {
                         let state = self.world.block(bx, by, bz);
                         let name = &self.res.facts().get(state).name;
                         let is_chest = chest_esp
