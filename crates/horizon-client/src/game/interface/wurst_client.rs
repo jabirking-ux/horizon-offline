@@ -1862,7 +1862,7 @@ impl Game<'_> {
 
         let bg_rgb = self.wurst.settings.clickgui_bg_color;
         let ac_rgb = if self.wurst.is_enabled(HackId::RainbowUI) {
-            Self::rainbow_color(self.tick_count as f32 * 0.05)
+            Self::rainbow_color(self.potions.effects.tick_count as f32 * 0.05)
         } else {
             self.wurst.settings.clickgui_ac_color
         };
