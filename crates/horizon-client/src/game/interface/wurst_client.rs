@@ -2167,7 +2167,7 @@ impl Game<'_> {
                 ([min[0], min[1], max[2]], [min[0], max[1], max[2]]),
             ];
             for (a, b) in edges {
-                g.on_top.push(horizon_client_render::Line {
+                g.on_top.push(horizon_client_lib::gizmos::Line {
                     start: a,
                     end: b,
                     color,
