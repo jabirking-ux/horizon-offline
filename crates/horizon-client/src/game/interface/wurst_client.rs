@@ -2006,6 +2006,22 @@ impl Game<'_> {
         if self.wurst.is_enabled(HackId::AutoRespawn) && self.screen == super::Screen::Dead {
             let _ = self.respawn_player();
         }
+        if self.wurst.is_enabled(HackId::AntiAFK) && (self.tick_count % 100 == 0) {
+            self.yaw = (self.yaw + 0.5) % 360.0;
+        }
+        if self.wurst.is_enabled(HackId::AutoArmor) {
+            let suffixes = ["_helmet", "_chestplate", "_leggings", "_boots"];
+            for (armor_idx, suffix) in suffixes.iter().enumerate() {
+                if self.armor.get(armor_idx).is_some_and(Option::is_none) {
+                    if let Some(slot) = self.inventory.iter().take(9).position(|s| {
+                        s.as_ref().is_some_and(|st| st.item.ends_with(suffix))
+                    }) {
+                        self.armor[armor_idx] = self.inventory[slot].take();
+                        break;
+                    }
+                }
+            }
+        }
         if self.wurst.is_enabled(HackId::AutoTotem) {
             let has_totem = self
                 .offhand
@@ -2117,8 +2133,9 @@ impl Game<'_> {
         let mob_esp = self.wurst.is_enabled(HackId::MobESP);
         let item_esp = self.wurst.is_enabled(HackId::ItemESP);
         let chest_esp = self.wurst.is_enabled(HackId::ChestESP);
+        let base_finder = self.wurst.is_enabled(HackId::BaseFinder);
         let tracers = self.wurst.is_enabled(HackId::Tracers);
-        if !player_esp && !mob_esp && !item_esp && !chest_esp && !tracers {
+        if !player_esp && !mob_esp && !item_esp && !chest_esp && !base_finder && !tracers {
             return;
         }
         let lerp = |a: f64, b: f64| a + f64::from(alpha) * (b - a);
@@ -2187,7 +2204,7 @@ impl Game<'_> {
                 );
             }
         }
-        if self.wurst.is_enabled(HackId::ChestESP)
+        if (chest_esp || base_finder)
             && let Some(p) = self.player.as_ref()
         {
             let px = p.position.x.floor() as i32;
@@ -2198,17 +2215,28 @@ impl Game<'_> {
                     for bz in (pz - 12)..=(pz + 12) {
                         let state = self.world.block(bx, by, bz);
                         let name = &self.res.facts().get(state).name;
-                        if name.contains("chest")
-                            || name.contains("shulker_box")
-                            || name.contains("barrel")
-                        {
+                        let is_chest = chest_esp
+                            && (name.contains("chest")
+                                || name.contains("shulker_box")
+                                || name.contains("barrel"));
+                        let is_base = base_finder
+                            && (name.contains("beacon")
+                                || name.contains("spawner")
+                                || name.contains("enchanting_table")
+                                || name.contains("anvil"));
+                        if is_chest || is_base {
                             let x = (f64::from(bx) - camera[0]) as f32;
                             let y = (f64::from(by) - camera[1]) as f32;
                             let z = (f64::from(bz) - camera[2]) as f32;
+                            let color = if is_chest {
+                                [1.0, 0.65, 0.1, 1.0]
+                            } else {
+                                [0.8, 0.2, 1.0, 1.0]
+                            };
                             push_box(
                                 [x + 0.05, y + 0.05, z + 0.05],
                                 [x + 0.95, y + 0.95, z + 0.95],
-                                [1.0, 0.65, 0.1, 1.0],
+                                color,
                             );
                         }
                     }
