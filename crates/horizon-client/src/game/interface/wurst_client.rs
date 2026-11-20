@@ -834,14 +834,18 @@ impl Game<'_> {
                     if rel_y >= 0.0 {
                         let row = (rel_y / row_step) as usize;
                         let in_row_y = rel_y - (row as f32) * row_step;
+                        let scroll_pad = if inner_h > MAX_INNER_HEIGHT { 3.0 } else { 0.0 };
                         if in_row_y <= 11.0
+                            && mx >= win.x + 2.0
+                            && mx <= win.x + win.width - 2.0 - scroll_pad
                             && let Some(&id) = hacks.get(row)
                             && button == MouseButton::Left
                         {
-                            let bx3 = win.x + win.width
-                                - 2.0
-                                - if win.scroll_enabled { 3.0 } else { 0.0 }
-                                - 11.0;
+                            if idx + 1 < self.wurst.gui_windows.len() {
+                                let w = self.wurst.gui_windows.remove(idx);
+                                self.wurst.gui_windows.push(w);
+                            }
+                            let bx3 = win.x + win.width - 2.0 - scroll_pad - 11.0;
                             if id.has_settings() && mx >= bx3 {
                                 if self.wurst.settings_popup.is_some_and(|(cur, _, _)| cur == id) {
                                     self.wurst.settings_popup = None;
