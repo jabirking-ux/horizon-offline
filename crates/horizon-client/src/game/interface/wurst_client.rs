@@ -2151,7 +2151,7 @@ impl Game<'_> {
             return;
         }
         let lerp = |a: f64, b: f64| a + f64::from(alpha) * (b - a);
-        let mut push_box = |min: [f32; 3], max: [f32; 3], color: [f32; 4]| {
+        let mut push_box = |min: [f64; 3], max: [f64; 3], color: u32| {
             let edges = [
                 ([min[0], min[1], min[2]], [max[0], min[1], min[2]]),
                 ([max[0], min[1], min[2]], [max[0], min[1], max[2]]),
@@ -2171,6 +2171,7 @@ impl Game<'_> {
                     start: a,
                     end: b,
                     color,
+                    width: 2.0,
                 });
             }
         };
@@ -2183,27 +2184,23 @@ impl Game<'_> {
             if (is_player && !player_esp) || (!is_player && !mob_esp) {
                 continue;
             }
-            let x = (lerp(m.previous.x, m.position.x) - camera[0]) as f32;
-            let y = (lerp(m.previous.y, m.position.y) - camera[1]) as f32;
-            let z = (lerp(m.previous.z, m.position.z) - camera[2]) as f32;
-            let hw = m.width() * 0.5;
-            let h = m.height();
-            let color = if is_player {
-                [0.2, 1.0, 0.2, 1.0]
-            } else {
-                [1.0, 0.3, 0.3, 1.0]
-            };
+            let x = lerp(m.previous.x, m.position.x);
+            let y = lerp(m.previous.y, m.position.y);
+            let z = lerp(m.previous.z, m.position.z);
+            let hw = f64::from(m.width()) * 0.5;
+            let h = f64::from(m.height());
+            let color = if is_player { 0xFF33FF33 } else { 0xFFFF4444 };
             push_box([x - hw, y, z - hw], [x + hw, y + h, z + hw], color);
         }
         if item_esp {
             for item in &self.dropped {
-                let x = (lerp(item.previous.x, item.position.x) - camera[0]) as f32;
-                let y = (lerp(item.previous.y, item.position.y) - camera[1]) as f32;
-                let z = (lerp(item.previous.z, item.position.z) - camera[2]) as f32;
+                let x = lerp(item.previous.x, item.position.x);
+                let y = lerp(item.previous.y, item.position.y);
+                let z = lerp(item.previous.z, item.position.z);
                 push_box(
                     [x - 0.15, y, z - 0.15],
                     [x + 0.15, y + 0.3, z + 0.15],
-                    [1.0, 1.0, 0.2, 1.0],
+                    0xFFFFFF33,
                 );
             }
         }
@@ -2230,15 +2227,15 @@ impl Game<'_> {
                         let is_ore = xray
                             && (name.ends_with("_ore") || name.contains("ancient_debris"));
                         if is_chest || is_base || is_ore {
-                            let x = (f64::from(bx) - camera[0]) as f32;
-                            let y = (f64::from(by) - camera[1]) as f32;
-                            let z = (f64::from(bz) - camera[2]) as f32;
+                            let x = f64::from(bx);
+                            let y = f64::from(by);
+                            let z = f64::from(bz);
                             let color = if is_chest {
-                                [1.0, 0.65, 0.1, 1.0]
+                                0xFFFFA51A
                             } else if is_ore {
-                                [0.0, 0.9, 1.0, 1.0]
+                                0xFF00E5FF
                             } else {
-                                [0.8, 0.2, 1.0, 1.0]
+                                0xFFCC33FF
                             };
                             push_box(
                                 [x + 0.05, y + 0.05, z + 0.05],
