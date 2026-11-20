@@ -2045,6 +2045,31 @@ impl Game<'_> {
                 self.swing_arm();
             }
         }
+        if self.wurst.is_enabled(HackId::BowAimbot)
+            && self
+                .held()
+                .is_some_and(|s| s.item.contains("bow") || s.item.contains("crossbow"))
+            && let Some(player) = self.player.as_ref()
+        {
+            let eye = player.position + glam::DVec3::new(0.0, 1.62, 0.0);
+            let mut best: Option<(glam::DVec3, f64)> = None;
+            for m in self.mobs.iter() {
+                if m.removed || !m.alive() || Some(m.id) == self.remote_camera_id() {
+                    continue;
+                }
+                let target = m.position + glam::DVec3::new(0.0, f64::from(m.height()) * 0.5, 0.0);
+                let d_sq = target.distance_squared(eye);
+                if d_sq <= 48.0 * 48.0 && best.is_none_or(|(_, bd)| d_sq < bd) {
+                    best = Some((target, d_sq));
+                }
+            }
+            if let Some((target, _)) = best {
+                let d = target - eye;
+                let horiz = (d.x * d.x + d.z * d.z).sqrt();
+                self.yaw = ((-d.x).atan2(d.z).to_degrees()) as f32;
+                self.pitch = ((-d.y).atan2(horiz).to_degrees()) as f32;
+            }
+        }
         if self.wurst.is_enabled(HackId::Killaura)
             && let Some(player) = self.player.as_ref()
             && !player.health.dead_or_dying()
@@ -2091,8 +2116,9 @@ impl Game<'_> {
         let player_esp = self.wurst.is_enabled(HackId::PlayerESP);
         let mob_esp = self.wurst.is_enabled(HackId::MobESP);
         let item_esp = self.wurst.is_enabled(HackId::ItemESP);
+        let chest_esp = self.wurst.is_enabled(HackId::ChestESP);
         let tracers = self.wurst.is_enabled(HackId::Tracers);
-        if !player_esp && !mob_esp && !item_esp && !tracers {
+        if !player_esp && !mob_esp && !item_esp && !chest_esp && !tracers {
             return;
         }
         let lerp = |a: f64, b: f64| a + f64::from(alpha) * (b - a);
@@ -2159,6 +2185,34 @@ impl Game<'_> {
                     [x + 0.15, y + 0.3, z + 0.15],
                     [1.0, 1.0, 0.2, 1.0],
                 );
+            }
+        }
+        if self.wurst.is_enabled(HackId::ChestESP)
+            && let Some(p) = self.player.as_ref()
+        {
+            let px = p.position.x.floor() as i32;
+            let py = p.position.y.floor() as i32;
+            let pz = p.position.z.floor() as i32;
+            for bx in (px - 12)..=(px + 12) {
+                for by in (py - 8)..=(py + 8) {
+                    for bz in (pz - 12)..=(pz + 12) {
+                        let state = self.world.block(bx, by, bz);
+                        let name = &self.res.facts().get(state).name;
+                        if name.contains("chest")
+                            || name.contains("shulker_box")
+                            || name.contains("barrel")
+                        {
+                            let x = (f64::from(bx) - camera[0]) as f32;
+                            let y = (f64::from(by) - camera[1]) as f32;
+                            let z = (f64::from(bz) - camera[2]) as f32;
+                            push_box(
+                                [x + 0.05, y + 0.05, z + 0.05],
+                                [x + 0.95, y + 0.95, z + 0.95],
+                                [1.0, 0.65, 0.1, 1.0],
+                            );
+                        }
+                    }
+                }
             }
         }
     }
