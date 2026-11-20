@@ -1356,7 +1356,6 @@ impl Game<'_> {
                 );
             }
 
-            // Primary Enable/Disable button at (mx - 151, h - 65, 302, 18)
             let on = self.wurst.is_enabled(id);
             let p_hov = horizon_client::ui::hovered(cur, mx - 151.0, h - 65.0, 302.0, 18.0);
             let p_bg = match (on, p_hov) {
@@ -1379,148 +1378,6 @@ impl Game<'_> {
             );
             return;
         }
-
-        // NavigatorMainScreen.java: no dark background/blur; "Search: " at (middleX - 150, 32)
-        batch.text_styled(
-            atlas,
-            &Text::literal("Search: "),
-            mx - 150.0,
-            32.0,
-            txt_color,
-            true,
-        );
-        let search_txt = if self.wurst.navigator_query.is_empty() {
-            "_".to_owned()
-        } else {
-            format!("{}_", self.wurst.navigator_query)
-        };
-        batch.text_styled(
-            atlas,
-            &Text::literal(search_txt),
-            mx - 100.0,
-            32.0,
-            txt_color,
-            true,
-        );
-
-        let list_x = mx - 154.0;
-        let items = self.navigator_filtered();
-        let content_h = ((items.len() / 3) as f32) * 20.0;
-        let max_scroll = (h - content_h - 120.0).min(0.0);
-        let max_scroll_rows = ((-max_scroll) / 20.0).ceil() as usize;
-        let scroll_px = -((self.wurst.navigator_scroll.min(max_scroll_rows) as f32) * 20.0);
-
-        let clip_start = batch.vertices.len();
-        let mut tooltip: Option<&'static str> = None;
-
-        for (i, &id) in items.iter().enumerate() {
-            let fx = list_x + 104.0 * ((i % 3) as f32);
-            let fy = 60.0 + ((i / 3) as f32) * 20.0 + scroll_px;
-            if fy < 40.0 {
-                continue;
-            }
-            if fy > h - 40.0 {
-                break;
-            }
-            let hov = cur.1 >= 59.0
-                && cur.1 <= h - 42.0
-                && horizon_client::ui::hovered(cur, fx, fy, 100.0, 16.0);
-            if hov {
-                tooltip = Some(id.description());
-            }
-            let on = self.wurst.is_enabled(id);
-            let bg = match (on, hov) {
-                (true, true) => green_hover,
-                (true, false) => green_on,
-                (false, true) => bg_hover,
-                (false, false) => bg_color,
-            };
-            batch.fill(atlas, fx, fy, 100.0, 16.0, bg);
-            Self::draw_border_2d(batch, atlas, fx, fy, fx + 100.0, fy + 16.0, outline_color);
-
-            // Vertical 1px separator at x + 84 (y + 2..y + 14) + downward arrow
-            let bx1 = fx + 84.0;
-            batch.fill(atlas, bx1, fy + 2.0, 1.0, 12.0, outline_color);
-            Self::draw_minimize_arrow(
-                batch,
-                atlas,
-                bx1 + 2.0,
-                fy + 2.5,
-                fx + 98.0,
-                fy + 13.0,
-                hov,
-                true,
-            );
-
-            batch.text_styled(
-                atlas,
-                &Text::literal(id.name()),
-                fx + 4.0,
-                fy + 4.0,
-                txt_color,
-                false,
-            );
-        }
-        batch.clip_since(clip_start, 0.0, 59.0, w, h - 42.0);
-
-        // Scrollbar at (middleX + 170, 60) .. (middleX + 182, height - 43)
-        if max_scroll < 0.0 {
-            let sb_x = mx + 170.0;
-            let sb_y = 60.0;
-            let sb_h = (h - 103.0).max(28.0);
-            batch.fill(atlas, sb_x, sb_y, 12.0, sb_h, bg_color);
-            Self::draw_border_2d(batch, atlas, sb_x, sb_y, sb_x + 12.0, sb_y + sb_h, outline_color);
-
-            let pct = (scroll_px / max_scroll).clamp(0.0, 1.0);
-            let knob_y = sb_y + 2.0 + (sb_h - 28.0).max(0.0) * pct;
-            batch.fill(atlas, sb_x + 2.0, knob_y, 8.0, 24.0, bg_color);
-            Self::draw_border_2d(batch, atlas, sb_x + 2.0, knob_y, sb_x + 10.0, knob_y + 24.0, outline_color);
-        }
-
-        // Tooltip
-        if let Some(tip) = tooltip {
-            let tw = HudBatch::text_width(atlas, tip) + 4.0;
-            let tx = if cur.0 + tw + 11.0 <= w {
-                cur.0 + 8.0
-            } else {
-                (cur.0 - tw - 8.0).max(4.0)
-            };
-            let ty = if cur.1 + 12.0 <= h {
-                cur.1 - 4.0
-            } else {
-                cur.1 - 16.0
-            };
-            batch.fill(atlas, tx, ty, tw, 13.0, rgba(64, 64, 64, 191));
-            Self::draw_border_2d(batch, atlas, tx, ty, tx + tw, ty + 13.0, outline_color);
-            batch.text_styled(atlas, &Text::literal(tip), tx + 2.0, ty + 2.0, txt_color, false);
-        }
-    }
-
-    /// Draws Wurst7's `WurstLogo`, `TabGui`, `HackListHUD`, `ClickGui`, `Navigator`, and `WurstOptionsScreen`.
-    pub(super) fn draw_wurst_hud(&self, batch: &mut HudBatch) {
-        if !self.wurst.active {
-            return;
-        }
-        if self.wurst.wurst_options_open {
-            self.draw_wurst_options_screen(batch);
-            return;
-        }
-        if self.wurst.navigator_open {
-            self.draw_navigator_screen(batch);
-            return;
-        }
-
-        let atlas = &self.gui.atlas;
-        let (w, _h) = (batch.width, batch.height);
-
-        let bg_color = rgba(64, 64, 64, 128);
-        let bg_hover = rgba(64, 64, 64, 191);
-        let ac_color = rgba(16, 16, 16, 128);
-        let ac_hover = rgba(16, 16, 16, 191);
-        let outline_color = rgba(16, 16, 16, 128);
-        let txt_color = rgba(240, 240, 240, 255);
-        let green_on = rgba(0, 255, 0, 128);
-        let green_hover = rgba(0, 255, 0, 191);
 
         if let Some(id) = self.wurst.navigator_feature {
             let bgx1 = mx - 154.0;
@@ -1624,6 +1481,150 @@ impl Game<'_> {
             return;
         }
 
+        // NavigatorMainScreen.java: no dark background/blur; "Search: " at (middleX - 150, 32)
+        batch.text_styled(
+            atlas,
+            &Text::literal("Search: "),
+            mx - 150.0,
+            32.0,
+            txt_color,
+            true,
+        );
+        let search_txt = if self.wurst.navigator_query.is_empty() {
+            "_".to_owned()
+        } else {
+            format!("{}_", self.wurst.navigator_query)
+        };
+        batch.text_styled(
+            atlas,
+            &Text::literal(search_txt),
+            mx - 100.0,
+            32.0,
+            txt_color,
+            true,
+        );
+
+        let list_x = mx - 154.0;
+        let items = self.navigator_filtered();
+        let content_h = ((items.len() / 3) as f32) * 20.0;
+        let max_scroll = (h - content_h - 120.0).min(0.0);
+        let max_scroll_rows = ((-max_scroll) / 20.0).ceil() as usize;
+        let scroll_px = -((self.wurst.navigator_scroll.min(max_scroll_rows) as f32) * 20.0);
+
+        let clip_start = batch.vertices.len();
+        let mut tooltip: Option<&'static str> = None;
+
+        for (i, &id) in items.iter().enumerate() {
+            let fx = list_x + 104.0 * ((i % 3) as f32);
+            let fy = 60.0 + ((i / 3) as f32) * 20.0 + scroll_px;
+            if fy < 40.0 {
+                continue;
+            }
+            if fy > h - 40.0 {
+                break;
+            }
+            let hov = cur.1 >= 59.0
+                && cur.1 <= h - 42.0
+                && horizon_client::ui::hovered(cur, fx, fy, 100.0, 16.0);
+            if hov {
+                tooltip = Some(id.description());
+            }
+            let on = self.wurst.is_enabled(id);
+            let bg = match (on, hov) {
+                (true, true) => green_hover,
+                (true, false) => green_on,
+                (false, true) => bg_hover,
+                (false, false) => bg_color,
+            };
+            batch.fill(atlas, fx, fy, 100.0, 16.0, bg);
+            Self::draw_border_2d(batch, atlas, fx, fy, fx + 100.0, fy + 16.0, outline_color);
+
+            // Vertical 1px separator at x + 84 (y + 2..y + 14) + downward arrow
+            let bx1 = fx + 84.0;
+            batch.fill(atlas, bx1, fy + 2.0, 1.0, 12.0, outline_color);
+            Self::draw_minimize_arrow(
+                batch,
+                atlas,
+                bx1 + 2.0,
+                fy + 2.5,
+                fx + 98.0,
+                fy + 13.0,
+                hov,
+                true,
+            );
+
+            let txt_clip = batch.vertices.len();
+            batch.text_styled(
+                atlas,
+                &Text::literal(id.name()),
+                fx + 4.0,
+                fy + 4.0,
+                txt_color,
+                false,
+            );
+            batch.clip_since(txt_clip, fx + 2.0, fy, bx1 - 1.0, fy + 16.0);
+        }
+        batch.clip_since(clip_start, 0.0, 59.0, w, h - 42.0);
+
+        // Scrollbar at (middleX + 170, 60) .. (middleX + 182, height - 43)
+        if max_scroll < 0.0 {
+            let sb_x = mx + 170.0;
+            let sb_y = 60.0;
+            let sb_h = (h - 103.0).max(28.0);
+            batch.fill(atlas, sb_x, sb_y, 12.0, sb_h, bg_color);
+            Self::draw_border_2d(batch, atlas, sb_x, sb_y, sb_x + 12.0, sb_y + sb_h, outline_color);
+
+            let pct = (scroll_px / max_scroll).clamp(0.0, 1.0);
+            let knob_y = sb_y + 2.0 + (sb_h - 28.0).max(0.0) * pct;
+            batch.fill(atlas, sb_x + 2.0, knob_y, 8.0, 24.0, bg_color);
+            Self::draw_border_2d(batch, atlas, sb_x + 2.0, knob_y, sb_x + 10.0, knob_y + 24.0, outline_color);
+        }
+
+        // Tooltip
+        if let Some(tip) = tooltip {
+            let tw = HudBatch::text_width(atlas, tip) + 4.0;
+            let tx = if cur.0 + tw + 11.0 <= w {
+                cur.0 + 8.0
+            } else {
+                (cur.0 - tw - 8.0).max(4.0)
+            };
+            let ty = if cur.1 + 12.0 <= h {
+                cur.1 - 4.0
+            } else {
+                cur.1 - 16.0
+            };
+            batch.fill(atlas, tx, ty, tw, 13.0, rgba(64, 64, 64, 191));
+            Self::draw_border_2d(batch, atlas, tx, ty, tx + tw, ty + 13.0, outline_color);
+            batch.text_styled(atlas, &Text::literal(tip), tx + 2.0, ty + 2.0, txt_color, false);
+        }
+    }
+
+    /// Draws Wurst7's `WurstLogo`, `TabGui`, `HackListHUD`, `ClickGui`, `Navigator`, and `WurstOptionsScreen`.
+    pub(super) fn draw_wurst_hud(&self, batch: &mut HudBatch) {
+        if !self.wurst.active {
+            return;
+        }
+        if self.wurst.wurst_options_open {
+            self.draw_wurst_options_screen(batch);
+            return;
+        }
+        if self.wurst.navigator_open {
+            self.draw_navigator_screen(batch);
+            return;
+        }
+
+        let atlas = &self.gui.atlas;
+        let (w, _h) = (batch.width, batch.height);
+
+        let bg_color = rgba(64, 64, 64, 128);
+        let bg_hover = rgba(64, 64, 64, 191);
+        let ac_color = rgba(16, 16, 16, 128);
+        let ac_hover = rgba(16, 16, 16, 191);
+        let outline_color = rgba(16, 16, 16, 128);
+        let txt_color = rgba(240, 240, 240, 255);
+        let green_on = rgba(0, 255, 0, 128);
+        let green_hover = rgba(0, 255, 0, 191);
+
         // 1. WurstLogo.java (exact coordinates & wurst_128.png RLE graphic)
         if self.wurst.settings.show_watermark {
             let ver = format!(
@@ -1645,8 +1646,8 @@ impl Game<'_> {
             Self::draw_wurst_logo(batch, atlas, 0.0, 3.0, 1.0, 1.0);
         }
 
-        // 2. TabGui.java: (2, 23), off by default just like TabGuiOtf.java
-        if self.wurst.settings.show_tabgui {
+        // 2. TabGui.java: (2, 23), off by default, hidden while ClickGUI is open
+        if self.wurst.settings.show_tabgui && !self.wurst.menu_open {
             let tx = 2.0_f32;
             let ty = 23.0_f32;
             let tw = 64.0_f32;
