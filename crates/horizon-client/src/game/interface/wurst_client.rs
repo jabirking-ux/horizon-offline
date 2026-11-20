@@ -745,8 +745,8 @@ impl Game<'_> {
             return true;
         }
         if self.wurst.navigator_open {
-            if pressed && button == MouseButton::Left {
-                self.click_navigator();
+            if pressed && (button == MouseButton::Left || button == MouseButton::Right) {
+                self.click_navigator(button == MouseButton::Right);
             }
             return true;
         }
@@ -828,7 +828,11 @@ impl Game<'_> {
                             && let Some(&id) = hacks.get(row)
                             && button == MouseButton::Left
                         {
-                            if id.has_settings() && mx > win.x + win.width - 15.0 {
+                            let bx3 = win.x + win.width
+                                - 2.0
+                                - if win.scroll_enabled { 3.0 } else { 0.0 }
+                                - 11.0;
+                            if id.has_settings() && mx >= bx3 {
                                 if self.wurst.settings_popup.is_some_and(|(cur, _, _)| cur == id) {
                                     self.wurst.settings_popup = None;
                                 } else {
@@ -1209,7 +1213,7 @@ impl Game<'_> {
             .collect()
     }
 
-    fn click_navigator(&mut self) {
+    fn click_navigator(&mut self, right_click: bool) {
         let (w, h) = self.gui_size();
         let cur = self.cursor;
         let mx = w * 0.5;
@@ -1851,7 +1855,10 @@ impl Game<'_> {
                             bx2 - 1.0,
                             by2 - 0.5,
                             h_set,
-                            true,
+                            !self
+                                .wurst
+                                .settings_popup
+                                .is_some_and(|(cur, _, _)| cur == id),
                         );
                     }
                     Self::draw_border_2d(batch, atlas, bx1, by1, bx2, by2, outline_color);
