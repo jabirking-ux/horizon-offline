@@ -2003,8 +2003,18 @@ impl Game<'_> {
     }
 
     fn tick_wurst_combat(&mut self) {
+        if self.wurst.is_enabled(HackId::Panic) {
+            self.wurst.enabled.clear();
+            return;
+        }
         if self.wurst.is_enabled(HackId::AutoRespawn) && self.screen == super::Screen::Dead {
             let _ = self.respawn_player();
+        }
+        if self.wurst.is_enabled(HackId::AutoJump)
+            && let Some(p) = self.player.as_mut()
+            && p.ground.on_ground
+        {
+            p.velocity.y = 0.42;
         }
         if self.wurst.is_enabled(HackId::AntiAFK) && (self.tick_count % 100 == 0) {
             self.yaw = (self.yaw + 0.5) % 360.0;
