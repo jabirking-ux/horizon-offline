@@ -2144,8 +2144,9 @@ impl Game<'_> {
         let item_esp = self.wurst.is_enabled(HackId::ItemESP);
         let chest_esp = self.wurst.is_enabled(HackId::ChestESP);
         let base_finder = self.wurst.is_enabled(HackId::BaseFinder);
+        let xray = self.wurst.is_enabled(HackId::XRay);
         let tracers = self.wurst.is_enabled(HackId::Tracers);
-        if !player_esp && !mob_esp && !item_esp && !chest_esp && !base_finder && !tracers {
+        if !player_esp && !mob_esp && !item_esp && !chest_esp && !base_finder && !xray && !tracers {
             return;
         }
         let lerp = |a: f64, b: f64| a + f64::from(alpha) * (b - a);
@@ -2214,7 +2215,7 @@ impl Game<'_> {
                 );
             }
         }
-        if (chest_esp || base_finder)
+        if (chest_esp || base_finder || xray)
             && let Some(p) = self.player.as_ref()
         {
             let px = p.position.x.floor() as i32;
@@ -2234,12 +2235,16 @@ impl Game<'_> {
                                 || name.contains("spawner")
                                 || name.contains("enchanting_table")
                                 || name.contains("anvil"));
-                        if is_chest || is_base {
+                        let is_ore = xray
+                            && (name.ends_with("_ore") || name.contains("ancient_debris"));
+                        if is_chest || is_base || is_ore {
                             let x = (f64::from(bx) - camera[0]) as f32;
                             let y = (f64::from(by) - camera[1]) as f32;
                             let z = (f64::from(bz) - camera[2]) as f32;
                             let color = if is_chest {
                                 [1.0, 0.65, 0.1, 1.0]
+                            } else if is_ore {
+                                [0.0, 0.9, 1.0, 1.0]
                             } else {
                                 [0.8, 0.2, 1.0, 1.0]
                             };
